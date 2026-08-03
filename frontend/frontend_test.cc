@@ -107,6 +107,112 @@ TEST(FrontendTest, AnalyzesWithNamedCatalogs) {
       std::string::npos);
 }
 
+TEST(FrontendTest, ReusedNamedCatalogKeepsRequestsIndependent) {
+  Frontend frontend;
+  // A named catalog is built once and handed to every later request that asks
+  // for the same one, so what a request analyzes must not reach the next.
+  // Nothing here registers what a DDL statement declares.
+  ProcessResult ddl = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"id":"ddl","analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"CREATE TABLE leaky_t (a INT64)"}}})json",
+      1);
+  ASSERT_TRUE(ddl.ok) << ddl.output;
+
+  ProcessResult after = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"id":"after","analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT a FROM leaky_t"}}})json",
+      2);
+  ASSERT_FALSE(after.ok) << after.output;
+  FrontendResponse response = ParseResponse(after.output);
+  EXPECT_EQ(response.error().origin(), "googlesql");
+  EXPECT_NE(response.error().message().find("Table not found: leaky_t"),
+            std::string::npos)
+      << response.error().message();
+}
+
+TEST(FrontendTest, ReusedNamedCatalogKeepsPropertyGraphsResolved) {
+  Frontend frontend;
+  // The catalog's property graphs point at resolved expressions that belong to
+  // whoever built the catalog. A second analysis reading the same property has
+  // to find them exactly as the first did.
+  const std::string graph_request =
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"GRAPH aml MATCH (p:Person) RETURN p.name AS n"}}})json";
+  ProcessResult first = frontend.ProcessLine(graph_request, 1);
+  ASSERT_TRUE(first.ok) << first.output;
+  ProcessResult second = frontend.ProcessLine(graph_request, 2);
+  ASSERT_TRUE(second.ok) << second.output;
+  FrontendResponse first_response = ParseResponse(first.output);
+  FrontendResponse second_response = ParseResponse(second.output);
+  const std::string& first_debug = first_response.analyze().debug_string();
+  EXPECT_NE(first_debug.find("GraphGetElementProperty"), std::string::npos)
+      << first_debug;
+  EXPECT_EQ(second_response.analyze().debug_string(), first_debug);
+  EXPECT_EQ(second.output, first.output);
+
+  // Changing the language options replaces the entry, which tears down those
+  // outputs along with the catalog holding pointers into them, and analyzing
+  // the same statement afterwards builds a fresh pair. Whether the teardown
+  // runs in the order it must is not something a reply can show, so this is
+  // here to put that path under a run rather than to assert about it.
+  ProcessResult rebuilt = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","languageOptionsPreset":{"features":"LANGUAGE_FEATURES_DEVELOPMENT","allStatementKindsSupported":true,"allReservableKeywordsReserved":true},"request":{"sqlStatement":"GRAPH aml MATCH (p:Person) RETURN p.name AS n"}}})json",
+      3);
+  ASSERT_TRUE(rebuilt.ok) << rebuilt.output;
+  ProcessResult third = frontend.ProcessLine(graph_request, 4);
+  ASSERT_TRUE(third.ok) << third.output;
+  EXPECT_EQ(third.output, first.output);
+}
+
+TEST(FrontendTest, NamedCatalogFollowsChangingLanguageOptions) {
+  Frontend frontend;
+  // Language options are the only input to building a named catalog, so a
+  // request that changes them has to be answered by a catalog built under the
+  // ones it sent, whichever request came before it.
+  const std::string sample =
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT Key FROM KeyValue"}}})json";
+  ProcessResult before = frontend.ProcessLine(sample, 1);
+  ASSERT_TRUE(before.ok) << before.output;
+
+  // A different catalog under the same options may not be answered from the
+  // entry above.
+  ProcessResult other_catalog = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"SELECT Key FROM KeyValue"}}})json",
+      2);
+  ASSERT_FALSE(other_catalog.ok) << other_catalog.output;
+  EXPECT_NE(
+      ParseResponse(other_catalog.output).error().message().find("KeyValue"),
+      std::string::npos);
+
+  // Nor may the same catalog under different options. TYPEOF probes that from
+  // the catalog's own side rather than the analyzer's: which builtin functions
+  // a catalog carries is settled when it is built, so a narrow catalog kept
+  // past the options it was built for keeps answering "not found" for a
+  // request that enables the feature. The narrow request runs first for that
+  // reason: the analyzer filters a wider catalog down to the options in front
+  // of it, and so hides the mistake made in the other order.
+  const std::string narrow =
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"SELECT TYPEOF(1)","options":{"languageOptions":{}}}}})json";
+  // No language options at all, which is the documented named-catalog
+  // baseline: maximum released features, and TYPEOF among them.
+  const std::string wide =
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"SELECT TYPEOF(1)"}}})json";
+  ProcessResult narrow_first = frontend.ProcessLine(narrow, 3);
+  ASSERT_FALSE(narrow_first.ok) << narrow_first.output;
+  EXPECT_NE(ParseResponse(narrow_first.output)
+                .error()
+                .message()
+                .find("Function not found: TYPEOF"),
+            std::string::npos);
+  ProcessResult wide_second = frontend.ProcessLine(wide, 4);
+  ASSERT_TRUE(wide_second.ok) << wide_second.output;
+  ProcessResult narrow_again = frontend.ProcessLine(narrow, 5);
+  ASSERT_FALSE(narrow_again.ok) << narrow_again.output;
+  EXPECT_EQ(ParseResponse(narrow_again.output).error().message(),
+            ParseResponse(narrow_first.output).error().message());
+
+  ProcessResult again = frontend.ProcessLine(sample, 6);
+  ASSERT_TRUE(again.ok) << again.output;
+  EXPECT_EQ(again.output, before.output);
+}
+
 TEST(FrontendTest, UnsetAnalyzerOptionsUseGoogleSqlDefaults) {
   Frontend frontend;
   // preserve_column_aliases defaults to true in AnalyzerOptions, while the

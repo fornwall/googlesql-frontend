@@ -91,6 +91,14 @@ merged over a preset as [described below](#language-option-presets):
 {"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT key FROM KeyValue"}}}
 ```
 
+A named catalog is built once and reused by the requests that follow it naming
+the same catalog under the same language options, so a stream that keeps both
+fixed pays for `CATALOG_SAMPLE` once rather than per request; a stream that
+changes either rebuilds on each change. Reuse does not carry anything between
+requests: analysis never registers what a statement declares, so a
+`CREATE TABLE` analyzed against a named catalog stays invisible to the request
+after it.
+
 Scalar fields of `request.options` that the request does not set follow
 GoogleSQL's own `AnalyzerOptions` defaults rather than the protobuf zero value
 for their type. Sending `"options": {}` therefore analyzes exactly as sending

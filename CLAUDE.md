@@ -67,6 +67,12 @@ bazelisk build -c opt \
   statement kinds, and all reservable keywords. An explicit preset replaces
   that baseline; the request's own language options are then merged on top of
   the preset's expansion, and are preserved exactly when there is no preset.
+- A named catalog is built once and reused while the requests that follow name
+  the same catalog under the same language options; changing either rebuilds.
+  It is handed out to be read: nothing registers what a statement declares, so
+  a request's DDL stays invisible to the next one. The property-graph
+  definitions of a reused catalog are resolved once, into analyzer outputs
+  owned alongside it and released before it.
 - One expansion of `LanguageOptionsPreset` serves both applying it (`analyze`,
   `parse`) and reporting it (`languageOptions.preset`), so what a client reads
   back cannot drift from what the analyzer and parser were configured with.

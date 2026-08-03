@@ -672,11 +672,39 @@ ParseOperation EffectiveParseOperation(const ParseOperation& operation) {
   return effective;
 }
 
+// Resolves the property-graph definitions a catalog carries. The catalog is
+// left pointing at resolved expressions owned by `artifacts`, so `artifacts`
+// has to outlive every analysis that reads the catalog's property graphs, and
+// every rendering of what such an analysis produced.
+absl::Status ResolvePropertyGraphDefinitions(
+    const googlesql::LanguageOptions& language,
+    googlesql::SimpleCatalog* catalog,
+    std::vector<std::unique_ptr<const googlesql::AnalyzerOutput>>* artifacts) {
+  absl::flat_hash_set<const googlesql::PropertyGraph*> graphs;
+  absl::Status status = catalog->GetPropertyGraphs(&graphs);
+  if (!status.ok()) {
+    return status;
+  }
+  for (const googlesql::PropertyGraph* graph : graphs) {
+    status = googlesql::ResolveGraphPropertyDefinitions(language, graph,
+                                                        catalog, *artifacts);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return absl::OkStatus();
+}
+
+// `property_graphs_resolved` says the catalog arrived with its property-graph
+// definitions already resolved, by an owner that keeps the resolved
+// expressions alive for at least as long as the catalog. A catalog built for
+// this request alone arrives unresolved and is resolved here.
 absl::Status AnalyzeWithCatalog(
     googlesql::local_service::GoogleSqlLocalServiceImpl* service,
     const googlesql::local_service::AnalyzeRequest& request,
     const std::vector<const google::protobuf::DescriptorPool*>& pools,
-    googlesql::SimpleCatalog* catalog, AnalyzeResult* result) {
+    googlesql::SimpleCatalog* catalog, bool property_graphs_resolved,
+    AnalyzeResult* result) {
   googlesql::TypeFactory type_factory;
   googlesql::AnalyzerOptions options;
   absl::Status status = DeserializeAnalyzerOptions(request.options(), pools,
@@ -703,14 +731,9 @@ absl::Status AnalyzeWithCatalog(
   // expressions.
   std::vector<std::unique_ptr<const googlesql::AnalyzerOutput>>
       property_graph_artifacts;
-  absl::flat_hash_set<const googlesql::PropertyGraph*> graphs;
-  status = catalog->GetPropertyGraphs(&graphs);
-  if (!status.ok()) {
-    return status;
-  }
-  for (const googlesql::PropertyGraph* graph : graphs) {
-    status = googlesql::ResolveGraphPropertyDefinitions(
-        options.language(), graph, catalog, property_graph_artifacts);
+  if (!property_graphs_resolved) {
+    status = ResolvePropertyGraphDefinitions(options.language(), catalog,
+                                             &property_graph_artifacts);
     if (!status.ok()) {
       return status;
     }
@@ -794,7 +817,7 @@ absl::Status AnalyzeInlineCatalog(
     return catalog.status();
   }
   return AnalyzeWithCatalog(service, request, pools->ordered, catalog->get(),
-                            result);
+                            /*property_graphs_resolved=*/false, result);
 }
 
 googlesql::ParserOptions ParserOptionsFrom(
@@ -919,9 +942,45 @@ absl::Status ParseExtended(const ExtendedParseRequest& request,
   return absl::InvalidArgumentError("extended parse root is missing");
 }
 
+// Names what a named catalog is built from: which catalog, and the language
+// options it is built under.
+//
+// The name is taken from the LanguageOptions the catalog is built from rather
+// than from the proto the request carried, so that it stands for the value and
+// not for one spelling of it: LanguageOptions keeps each repeated field as a
+// set, so re-serializing drops the duplicates a preset merged with an explicit
+// list leaves behind, and fills in every field the request omitted. Serialize
+// writes exactly the members LanguageOptions::operator== compares, so two
+// option sets that analyze identically differ here only in the order the sets
+// happen to iterate in, and sorting removes that.
+//
+// The remaining direction is the one that matters: no two LanguageOptions that
+// differ can produce the same key, because every member is written and the
+// sort only permutes within a field.
+std::string NamedCatalogKey(
+    NamedCatalog named_catalog,
+    const googlesql::LanguageOptions& language_options) {
+  googlesql::LanguageOptionsProto canonical;
+  language_options.Serialize(&canonical);
+  std::sort(canonical.mutable_enabled_language_features()->begin(),
+            canonical.mutable_enabled_language_features()->end());
+  std::sort(canonical.mutable_supported_statement_kinds()->begin(),
+            canonical.mutable_supported_statement_kinds()->end());
+  std::sort(canonical.mutable_supported_generic_entity_types()->begin(),
+            canonical.mutable_supported_generic_entity_types()->end());
+  std::sort(canonical.mutable_supported_generic_sub_entity_types()->begin(),
+            canonical.mutable_supported_generic_sub_entity_types()->end());
+  std::sort(canonical.mutable_reserved_keywords()->begin(),
+            canonical.mutable_reserved_keywords()->end());
+  // The catalog is spelled ahead of a newline, which a decimal integer cannot
+  // contain, so the two parts cannot run together into a shared key.
+  return absl::StrCat(static_cast<int>(named_catalog), "\n",
+                      canonical.SerializeAsString());
+}
+
 absl::Status AnalyzeNamedCatalog(
     googlesql::local_service::GoogleSqlLocalServiceImpl* service,
-    NamedCatalog named_catalog,
+    NamedCatalogCache* catalogs, NamedCatalog named_catalog,
     const googlesql::local_service::AnalyzeRequest& request,
     AnalyzeResult* result) {
   absl::StatusOr<DescriptorPools> pools =
@@ -947,42 +1006,16 @@ absl::Status AnalyzeNamedCatalog(
     return options_status;
   }
 
-  const googlesql::LanguageOptions language_options(
-      request.options().language_options());
-  auto analyze = [&](googlesql::SimpleCatalog* catalog) -> absl::Status {
-    return AnalyzeWithCatalog(service, request, pools->ordered, catalog,
-                              result);
-  };
-
-  switch (named_catalog) {
-    case CATALOG_NONE: {
-      googlesql::SimpleCatalog catalog("simple_catalog");
-      absl::Status status = catalog.AddBuiltinFunctionsAndTypes(
-          googlesql::BuiltinFunctionOptions(language_options));
-      if (!status.ok()) {
-        return status;
-      }
-      return analyze(&catalog);
-    }
-    case CATALOG_SAMPLE: {
-      // SampleCatalogImpl creates its fixture views while it is initialized.
-      // Spanner DDL mode deliberately rejects CREATE VIEW during resolution,
-      // and SampleCatalogImpl turns that initialization error into a CHECK.
-      // The requested language options still reach AnalyzeImpl below; only
-      // disable this parser feature for construction of the sample fixtures.
-      googlesql::LanguageOptions catalog_language_options = language_options;
-      catalog_language_options.DisableLanguageFeature(
-          googlesql::FEATURE_SPANNER_LEGACY_DDL);
-      googlesql::SampleCatalogImpl sample_catalog;
-      absl::Status status = sample_catalog.LoadCatalogImpl(
-          googlesql::BuiltinFunctionOptions(catalog_language_options));
-      if (!status.ok()) {
-        return status;
-      }
-      return analyze(sample_catalog.catalog());
-    }
+  // The catalog belongs to the cache, which built it under these same
+  // language options and resolved its property-graph definitions then, holding
+  // on to the outputs those point into for as long as it holds the catalog.
+  absl::StatusOr<googlesql::SimpleCatalog*> catalog =
+      catalogs->Get(named_catalog, request.options().language_options());
+  if (!catalog.ok()) {
+    return catalog.status();
   }
-  return absl::InvalidArgumentError("unknown named catalog");
+  return AnalyzeWithCatalog(service, request, pools->ordered, *catalog,
+                            /*property_graphs_resolved=*/true, result);
 }
 
 size_t Utf8CodePointCount(absl::string_view value) {
@@ -1360,6 +1393,80 @@ ProcessResult Render(FrontendResponse response, bool ok) {
 
 }  // namespace
 
+absl::StatusOr<std::unique_ptr<NamedCatalogCache::Entry>>
+NamedCatalogCache::Build(NamedCatalog named_catalog,
+                         const googlesql::LanguageOptions& language_options) {
+  auto entry = std::make_unique<Entry>();
+  switch (named_catalog) {
+    case CATALOG_NONE: {
+      entry->simple_catalog =
+          std::make_unique<googlesql::SimpleCatalog>("simple_catalog");
+      absl::Status status = entry->simple_catalog->AddBuiltinFunctionsAndTypes(
+          googlesql::BuiltinFunctionOptions(language_options));
+      if (!status.ok()) {
+        return status;
+      }
+      entry->catalog = entry->simple_catalog.get();
+      break;
+    }
+    case CATALOG_SAMPLE: {
+      // SampleCatalogImpl creates its fixture views while it is initialized.
+      // Spanner DDL mode deliberately rejects CREATE VIEW during resolution,
+      // and SampleCatalogImpl turns that initialization error into a CHECK.
+      // The requested language options still reach the analysis itself; only
+      // disable this parser feature for construction of the sample fixtures.
+      googlesql::LanguageOptions catalog_language_options = language_options;
+      catalog_language_options.DisableLanguageFeature(
+          googlesql::FEATURE_SPANNER_LEGACY_DDL);
+      entry->sample_catalog = std::make_unique<googlesql::SampleCatalogImpl>();
+      absl::Status status = entry->sample_catalog->LoadCatalogImpl(
+          googlesql::BuiltinFunctionOptions(catalog_language_options));
+      if (!status.ok()) {
+        return status;
+      }
+      entry->catalog = entry->sample_catalog->catalog();
+      break;
+    }
+  }
+  if (entry->catalog == nullptr) {
+    return absl::InvalidArgumentError("unknown named catalog");
+  }
+
+  // Resolved once, under the language options the analysis itself runs with,
+  // rather than once per request: the outputs belong to the entry and outlive
+  // every request the catalog is handed to.
+  absl::Status status = ResolvePropertyGraphDefinitions(
+      language_options, entry->catalog, &entry->property_graph_artifacts);
+  if (!status.ok()) {
+    return status;
+  }
+  return entry;
+}
+
+absl::StatusOr<googlesql::SimpleCatalog*> NamedCatalogCache::Get(
+    NamedCatalog named_catalog,
+    const googlesql::LanguageOptionsProto& language_options) {
+  // Built once, and used both to name the entry and to build it, so the key
+  // cannot come to stand for something other than what was built.
+  const googlesql::LanguageOptions language(language_options);
+  std::string key = NamedCatalogKey(named_catalog, language);
+  if (entry_ != nullptr && key_ == key) {
+    return entry_->catalog;
+  }
+  // A build that fails is not held: it leaves the previous entry in place,
+  // and a request that repeats the failing configuration is answered by
+  // repeating the build, exactly as it would have been without a cache.
+  absl::StatusOr<std::unique_ptr<Entry>> built = Build(named_catalog, language);
+  if (!built.ok()) {
+    return built.status();
+  }
+  // Replaces the previous entry whole, so it is torn down in the order Entry
+  // declares rather than member by member. See the Entry declaration.
+  entry_ = std::move(*built);
+  key_ = std::move(key);
+  return entry_->catalog;
+}
+
 ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
   FrontendRequest request;
   absl::Status parse_status = ParseJson(input, &request);
@@ -1428,9 +1535,9 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
       const googlesql::local_service::AnalyzeRequest analyze_request =
           EffectiveAnalyzeRequest(request.analyze());
       if (request.analyze().has_named_catalog()) {
-        status =
-            AnalyzeNamedCatalog(&service_, request.analyze().named_catalog(),
-                                analyze_request, result);
+        status = AnalyzeNamedCatalog(&service_, &named_catalogs_,
+                                     request.analyze().named_catalog(),
+                                     analyze_request, result);
       } else {
         status = AnalyzeInlineCatalog(&service_, analyze_request, result);
       }
