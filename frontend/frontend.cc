@@ -471,15 +471,61 @@ absl::Status DeserializeAnalyzerOptions(
   return absl::OkStatus();
 }
 
+// The parameter rules of ValidateAnalyzerOptions, restated in the terms the
+// request used. Which of the two parameter lists an analysis may carry follows
+// from parameterMode, and allowUndeclaredParameters rules out declaring
+// positional ones alongside it.
+absl::Status ValidateQueryParameters(
+    const googlesql::AnalyzerOptions& options) {
+  const bool has_named = !options.query_parameters().empty();
+  const bool has_positional = !options.positional_query_parameters().empty();
+  switch (options.parameter_mode()) {
+    case googlesql::PARAMETER_NAMED:
+      if (has_positional) {
+        return absl::InvalidArgumentError(
+            "request.options.positionalQueryParameters is not allowed in "
+            "PARAMETER_NAMED mode");
+      }
+      break;
+    case googlesql::PARAMETER_POSITIONAL:
+      if (has_named) {
+        return absl::InvalidArgumentError(
+            "request.options.queryParameters is not allowed in "
+            "PARAMETER_POSITIONAL mode");
+      }
+      if (has_positional && options.allow_undeclared_parameters()) {
+        return absl::InvalidArgumentError(
+            "request.options.positionalQueryParameters is not allowed when "
+            "request.options.allowUndeclaredParameters is set");
+      }
+      break;
+    case googlesql::PARAMETER_NONE:
+      if (has_named || has_positional) {
+        return absl::InvalidArgumentError(
+            "request.options.queryParameters and "
+            "request.options.positionalQueryParameters are not allowed in "
+            "PARAMETER_NONE mode");
+      }
+      break;
+  }
+  return absl::OkStatus();
+}
+
 // Rejects analyzer configurations GoogleSQL cannot analyze under, before it
 // reaches them itself.
 //
-// GoogleSQL validates the same combinations, but states them as RET_CHECKs:
-// the request is answered with INTERNAL, whose message carries the file and
-// line of the check inside this build. Neither is right for a configuration
-// the request chose, so the same rules are read here and reported as an
-// invalid argument. Every analysis passes through this, so the answer does not
-// depend on which catalog the request selected.
+// GoogleSQL validates the same combinations, but states them as RET_CHECKs.
+// The request is then answered with INTERNAL, which claims a bug in this tool
+// for a configuration the request chose, and with a message assembled from the
+// file, line and C++ predicate of a check inside this build. So each rule is
+// read here first and reported as an invalid argument naming the request
+// members it is about. Every analysis passes through this, so the answer does
+// not depend on which catalog the request selected.
+//
+// GoogleSQL remains the authority: its own validation runs last and still
+// answers for anything the checks above do not name. A rule added upstream
+// therefore keeps being enforced, in upstream's own words, until it is
+// restated here.
 absl::Status ValidateAnalyzerConfiguration(
     const googlesql::AnalyzerOptions& options) {
   const googlesql::LanguageOptions& language = options.language();
@@ -489,6 +535,10 @@ absl::Status ValidateAnalyzerConfiguration(
     return absl::InvalidArgumentError(
         "FEATURE_COLLATION_SUPPORT requires "
         "FEATURE_ANNOTATION_FRAMEWORK to also be enabled");
+  }
+  const absl::Status parameters = ValidateQueryParameters(options);
+  if (!parameters.ok()) {
+    return parameters;
   }
   const absl::Status status = googlesql::ValidateAnalyzerOptions(options);
   if (status.ok()) {

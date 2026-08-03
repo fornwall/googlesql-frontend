@@ -1023,19 +1023,84 @@ TEST(FrontendTest, RejectsInvalidAnalyzerConfigurationTheSameWayEverywhere) {
             named_response.error().status_code());
   EXPECT_EQ(inline_response.error().message(),
             named_response.error().message());
+}
 
-  // The remaining rules read the same way. Parameters cannot be supplied when
-  // the request disables them, and GoogleSQL's own prose is preserved.
-  ProcessResult parameters = frontend.ProcessLine(
-      R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT 1","options":{"parameterMode":"PARAMETER_NONE","queryParameters":[{"name":"p","type":{"typeKind":"TYPE_INT64"}}]}}}})",
-      3);
-  ASSERT_FALSE(parameters.ok);
-  FrontendResponse parameter_response = ParseResponse(parameters.output);
-  EXPECT_EQ(parameter_response.error().status_code(), 3);
-  EXPECT_NE(parameter_response.error().message().find(
-                "Parameters are disabled and cannot be provided"),
-            std::string::npos)
-      << parameter_response.error().message();
+TEST(FrontendTest, RejectsQueryParameterConfigurationsInProtocolTerms) {
+  Frontend frontend;
+  // Each rule names the request members it is about, rather than passing on
+  // the file, line and C++ predicate of the RET_CHECK that states it upstream.
+  auto rejection = [&frontend](const std::string& options, int line) {
+    ProcessResult result = frontend.ProcessLine(
+        R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT 1","options":)" +
+            options + "}}}",
+        line);
+    EXPECT_FALSE(result.ok) << result.output;
+    FrontendResponse response = ParseResponse(result.output);
+    EXPECT_EQ(response.error().status_code(), 3) << result.output;
+    EXPECT_EQ(response.error().message().find("RET_CHECK"), std::string::npos)
+        << response.error().message();
+    return response.error().message();
+  };
+
+  const std::string named = R"({"name":"p","type":{"typeKind":"TYPE_INT64"}})";
+  const std::string positional = R"({"typeKind":"TYPE_INT64"})";
+
+  EXPECT_EQ(rejection(R"({"parameterMode":"PARAMETER_NAMED",)"
+                      R"("positionalQueryParameters":[)" +
+                          positional + "]}",
+                      1),
+            "request.options.positionalQueryParameters is not allowed in "
+            "PARAMETER_NAMED mode");
+
+  EXPECT_EQ(rejection(R"({"parameterMode":"PARAMETER_POSITIONAL",)"
+                      R"("queryParameters":[)" +
+                          named + "]}",
+                      2),
+            "request.options.queryParameters is not allowed in "
+            "PARAMETER_POSITIONAL mode");
+
+  EXPECT_EQ(rejection(R"({"parameterMode":"PARAMETER_POSITIONAL",)"
+                      R"("allowUndeclaredParameters":true,)"
+                      R"("positionalQueryParameters":[)" +
+                          positional + "]}",
+                      3),
+            "request.options.positionalQueryParameters is not allowed when "
+            "request.options.allowUndeclaredParameters is set");
+
+  EXPECT_EQ(rejection(R"({"parameterMode":"PARAMETER_NONE",)"
+                      R"("queryParameters":[)" +
+                          named + "]}",
+                      4),
+            "request.options.queryParameters and "
+            "request.options.positionalQueryParameters are not allowed in "
+            "PARAMETER_NONE mode");
+
+  // PARAMETER_NAMED is the default, so the first rule has to read the mode
+  // rather than assume the request stated it.
+  EXPECT_EQ(
+      rejection(R"({"positionalQueryParameters":[)" + positional + "]}", 5),
+      "request.options.positionalQueryParameters is not allowed in "
+      "PARAMETER_NAMED mode");
+
+  // The combinations each mode does allow still analyze.
+  ProcessResult named_ok = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT @p","options":{"parameterMode":"PARAMETER_NAMED","queryParameters":[)" +
+          named + "]}}}}",
+      6);
+  EXPECT_TRUE(named_ok.ok) << named_ok.output;
+
+  ProcessResult positional_ok = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT ?","options":{"parameterMode":"PARAMETER_POSITIONAL","positionalQueryParameters":[)" +
+          positional + "]}}}}",
+      7);
+  EXPECT_TRUE(positional_ok.ok) << positional_ok.output;
+
+  // GoogleSQL still answers for anything the checks above do not name, so a
+  // rule it gains keeps being enforced until this file restates it.
+  ProcessResult none_ok = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT 1","options":{"parameterMode":"PARAMETER_NONE"}}}})",
+      8);
+  EXPECT_TRUE(none_ok.ok) << none_ok.output;
 }
 
 TEST(FrontendTest, AnalyzesConnectionArgumentOnMultiSignatureTvf) {
