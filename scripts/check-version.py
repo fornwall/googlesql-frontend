@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that release metadata agrees with the frontend's source version."""
+"""Check that release metadata agrees with the frontend's source and patches."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+PATCH_PATH = "patches/googlesql/pull-5.patch"
+PATCH_LABEL = "//patches/googlesql:pull-5.patch"
 
 
 def read_one_line(name: str) -> str:
@@ -52,6 +54,27 @@ require(
 require(rf"googlesql-{re.escape(commit)}", module, "MODULE.bazel")
 require(rf"/archive/{re.escape(commit)}\.tar\.gz", module, "MODULE.bazel")
 
+# The GoogleSQL archive applies exactly one patch, and nothing else in the
+# repository notices if that line is deleted: the tree still builds, and a
+# default fastbuild test run still passes, because the defect the patch fixes
+# only exists once NDEBUG is defined. The optimized builds CI and releases ship
+# would then compute wrong analyzer results while BUILDINFO.txt still advertises
+# the patch. Assert the declaration itself, here, before anything compiles.
+require(r"^\s*patch_strip = 1,$", module, "MODULE.bazel")
+declared = re.search(r"^\s*patches = \[([^\]]*)\],$", module, flags=re.MULTILINE)
+if declared is None:
+    raise SystemExit("MODULE.bazel does not declare a patches list for googlesql")
+applied = re.findall(r'"([^"]*)"', declared.group(1))
+if applied != [PATCH_LABEL]:
+    raise SystemExit(
+        f"MODULE.bazel must apply exactly [{PATCH_LABEL!r}], not {applied!r}"
+    )
+if not (ROOT / PATCH_PATH).is_file():
+    raise SystemExit(f"{PATCH_PATH} is referenced by MODULE.bazel but missing")
+
+# An archive_override without an integrity hash fetches whatever the URL serves.
+require(r'^\s*integrity = "sha256-[A-Za-z0-9+/]+=*",$', module, "MODULE.bazel")
+
 release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 require(rf"GOOGLESQL_COMMIT:\s*{re.escape(commit)}", release, "release workflow")
 
@@ -72,4 +95,6 @@ if args.binary is not None:
 if args.tag is not None and args.tag != f"v{version}":
     raise SystemExit(f"release tag {args.tag!r} must equal 'v{version}'")
 
-print(f"versions agree: googlesql-frontend {version}, googlesql {commit}")
+print(
+    f"versions agree: googlesql-frontend {version}, googlesql {commit} + {PATCH_PATH}"
+)

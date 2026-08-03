@@ -1056,6 +1056,18 @@ TEST(FrontendTest, FoldsDateToDatetimeWithoutEpochRegression) {
       2);
   ASSERT_TRUE(evaluated.ok) << evaluated.output;
   EXPECT_EQ(ParseResponse(evaluated.output).analyze().debug_string(), debug);
+
+  // Everything above is a real check of the fold in every configuration, but
+  // only an optimized one can fail it for a missing patch: without NDEBUG the
+  // unpatched macro still evaluates its argument, so the defect does not exist
+  // and passing proves nothing about the patch. Say so rather than let a
+  // fastbuild green be read as evidence. A failure above still wins, because
+  // googletest reports a test as skipped only when nothing in it failed.
+#ifndef NDEBUG
+  GTEST_SKIP() << "NDEBUG is undefined here, so this configuration cannot "
+                  "detect a missing patches/googlesql/pull-5.patch; only "
+                  "-c opt can";
+#endif
 }
 
 TEST(FrontendTest, RejectsRegisteredCatalogsAndPoolsAtTheProtocolLayer) {
