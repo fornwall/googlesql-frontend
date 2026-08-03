@@ -926,6 +926,118 @@ TEST(FrontendTest, RejectsConflictingCatalogSelectors) {
             std::string::npos);
 }
 
+TEST(FrontendTest, FoldsDateToDatetimeWithoutEpochRegression) {
+  // patches/googlesql/pull-5.patch restores GOOGLESQL_QCHECK_OK's evaluation of
+  // its argument, which an optimized build otherwise compiles out. Without it
+  // the analyzer's DATE -> DATETIME fold never writes its output, and every
+  // input resolves to a default-constructed 1970-01-01 00:00:00 instead. The
+  // wrong answer is a plausible one, so the guard names both values.
+  Frontend frontend;
+  ProcessResult result = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"SELECT CAST(DATE '2024-03-14' AS DATETIME)"}}})json",
+      1);
+  ASSERT_TRUE(result.ok) << result.output;
+  FrontendResponse response = ParseResponse(result.output);
+  const std::string& debug = response.analyze().debug_string();
+  EXPECT_NE(debug.find("value=2024-03-14 00:00:00"), std::string::npos)
+      << debug;
+  EXPECT_EQ(debug.find("1970-01-01 00:00:00"), std::string::npos) << debug;
+
+  // The same statement under the analyzer's constant evaluator, which is the
+  // one analyzer option the frontend has to construct rather than deserialize.
+  ProcessResult evaluated = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"SELECT CAST(DATE '2024-03-14' AS DATETIME)","options":{"useConstantEvaluator":true}}}})json",
+      2);
+  ASSERT_TRUE(evaluated.ok) << evaluated.output;
+  EXPECT_EQ(ParseResponse(evaluated.output).analyze().debug_string(), debug);
+}
+
+TEST(FrontendTest, RejectsRegisteredCatalogsAndPoolsAtTheProtocolLayer) {
+  Frontend frontend;
+  // Both are rules of this protocol rather than of GoogleSQL: the frontend
+  // renders debugString from the live analysis, and neither a registered
+  // catalog nor a registered descriptor pool is reachable from this process.
+  // The layer that holds the rule is the layer that reports it.
+  ProcessResult registered_catalog = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"rc","analyze":{"request":{"sqlStatement":"SELECT 1","registeredCatalogId":"7"}}})",
+      1);
+  ASSERT_FALSE(registered_catalog.ok);
+  FrontendResponse catalog_response = ParseResponse(registered_catalog.output);
+  EXPECT_EQ(catalog_response.id(), "rc");
+  EXPECT_EQ(catalog_response.error().origin(), "protocol");
+  EXPECT_EQ(catalog_response.error().operation(), "analyze");
+  EXPECT_EQ(catalog_response.error().message(),
+            "debugString is unavailable for registered catalogs");
+
+  ProcessResult registered_pool = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT 1","descriptorPoolList":{"definitions":[{"registeredId":3}]}}}})",
+      2);
+  ASSERT_FALSE(registered_pool.ok);
+  FrontendResponse pool_response = ParseResponse(registered_pool.output);
+  EXPECT_EQ(pool_response.error().origin(), "protocol");
+  EXPECT_EQ(pool_response.error().message(),
+            "debugString is unavailable for registered descriptor pools");
+
+  ProcessResult empty_definition = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT 1","descriptorPoolList":{"definitions":[{}]}}}})",
+      3);
+  ASSERT_FALSE(empty_definition.ok);
+  FrontendResponse definition_response = ParseResponse(empty_definition.output);
+  EXPECT_EQ(definition_response.error().origin(), "protocol");
+  EXPECT_EQ(definition_response.error().message(),
+            "descriptor pool definition is missing");
+
+  // The pools a request may actually name are still accepted.
+  ProcessResult builtin_pool = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT 1","descriptorPoolList":{"definitions":[{"builtin":{}}]}}}})",
+      4);
+  ASSERT_TRUE(builtin_pool.ok) << builtin_pool.output;
+}
+
+TEST(FrontendTest, RejectsInvalidAnalyzerConfigurationTheSameWayEverywhere) {
+  Frontend frontend;
+  // GoogleSQL states these rules as RET_CHECKs, which reach a client as
+  // INTERNAL carrying the file and line of a check inside this build. They
+  // describe a configuration the request chose, so both catalog paths answer
+  // with the same invalid argument instead.
+  const std::string collation =
+      R"("request":{"sqlStatement":"SELECT 1","options":{"languageOptions":{"enabledLanguageFeatures":["FEATURE_COLLATION_SUPPORT"]}}}}})";
+
+  ProcessResult named = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE",)" +
+          collation,
+      1);
+  ASSERT_FALSE(named.ok);
+  FrontendResponse named_response = ParseResponse(named.output);
+  EXPECT_EQ(named_response.error().status_code(), 3);
+  EXPECT_EQ(named_response.error().status_name(), "INVALID_ARGUMENT");
+  EXPECT_EQ(named_response.error().message(),
+            "FEATURE_COLLATION_SUPPORT requires FEATURE_ANNOTATION_FRAMEWORK "
+            "to also be enabled");
+
+  ProcessResult inline_catalog = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{)" + collation, 2);
+  ASSERT_FALSE(inline_catalog.ok);
+  FrontendResponse inline_response = ParseResponse(inline_catalog.output);
+  EXPECT_EQ(inline_response.error().status_code(),
+            named_response.error().status_code());
+  EXPECT_EQ(inline_response.error().message(),
+            named_response.error().message());
+
+  // The remaining rules read the same way. Parameters cannot be supplied when
+  // the request disables them, and GoogleSQL's own prose is preserved.
+  ProcessResult parameters = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT 1","options":{"parameterMode":"PARAMETER_NONE","queryParameters":[{"name":"p","type":{"typeKind":"TYPE_INT64"}}]}}}})",
+      3);
+  ASSERT_FALSE(parameters.ok);
+  FrontendResponse parameter_response = ParseResponse(parameters.output);
+  EXPECT_EQ(parameter_response.error().status_code(), 3);
+  EXPECT_NE(parameter_response.error().message().find(
+                "Parameters are disabled and cannot be provided"),
+            std::string::npos)
+      << parameter_response.error().message();
+}
+
 TEST(FrontendTest, AnalyzesConnectionArgumentOnMultiSignatureTvf) {
   FrontendRequest request;
   request.set_protocol_version(1);
@@ -1512,6 +1624,36 @@ TEST(FrontendTest, EchoesValidIdOnProtoJsonErrors) {
   FrontendResponse response = ParseResponse(result.output);
   EXPECT_EQ(response.id(), "bogus");
   EXPECT_EQ(response.error().origin(), "proto_json");
+}
+
+TEST(FrontendTest, NamesTheOperationOnProtoJsonErrors) {
+  Frontend frontend;
+  // The envelope of a line that failed to decode still says which operation it
+  // carries, and an error names the operation whenever one can be identified.
+  ProcessResult unknown_enum = frontend.ProcessLine(
+      R"({"protocolVersion":1,"parse":{"request":{"sqlStatement":"SELECT 1","options":{"enabledLanguageFeatures":["FEATURE_NO_SUCH_THING_AT_ALL"]}}}})",
+      1);
+  ASSERT_FALSE(unknown_enum.ok);
+  FrontendResponse enum_response = ParseResponse(unknown_enum.output);
+  EXPECT_EQ(enum_response.error().origin(), "proto_json");
+  EXPECT_EQ(enum_response.error().operation(), "parse");
+
+  ProcessResult unknown_field = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT 1","options":{"noSuchOption":true}}}})",
+      2);
+  ASSERT_FALSE(unknown_field.ok);
+  EXPECT_EQ(ParseResponse(unknown_field.output).error().operation(), "analyze");
+
+  // A line that names no operation, or more than one, identifies none.
+  ProcessResult malformed = frontend.ProcessLine("{", 3);
+  ASSERT_FALSE(malformed.ok);
+  EXPECT_FALSE(ParseResponse(malformed.output).error().has_operation());
+
+  ProcessResult several = frontend.ProcessLine(
+      R"({"protocolVersion":1,"parse":{"request":{"sqlStatement":"SELECT 1","options":{"noSuchOption":true}}},"analyze":{"request":{"sqlStatement":"SELECT 1"}}})",
+      4);
+  ASSERT_FALSE(several.ok);
+  EXPECT_FALSE(ParseResponse(several.output).error().has_operation());
 }
 
 TEST(FrontendTest, RejectsNestedAndEscapedDuplicateMembers) {

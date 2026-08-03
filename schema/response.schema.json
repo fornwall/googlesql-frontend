@@ -350,8 +350,8 @@
       ],
       "properties": {
         "origin": {
+          "description": "The layer that rejected the request: the ProtoJSON decoder, this tool's own protocol rules, GoogleSQL itself, or this tool on an internal failure.",
           "enum": [
-            "json",
             "protocol",
             "proto_json",
             "googlesql",

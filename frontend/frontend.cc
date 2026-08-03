@@ -355,6 +355,32 @@ struct DescriptorPools {
   std::vector<const google::protobuf::DescriptorPool*> ordered;
 };
 
+// The pools an analyze request may name. A registered pool lives inside the
+// local service rather than in this process, so the frontend cannot read the
+// descriptors it would need to render debugString, and a definition that names
+// nothing cannot be built at all. Both are rules of this protocol rather than
+// of GoogleSQL, so ValidateRequest rejects them before any analysis begins and
+// BuildDescriptorPools repeats them only as a guard.
+absl::Status ValidateDescriptorPoolList(
+    const googlesql::local_service::DescriptorPoolListProto& definitions) {
+  using Definition =
+      googlesql::local_service::DescriptorPoolListProto::Definition;
+  for (const auto& definition : definitions.definitions()) {
+    switch (definition.definition_case()) {
+      case Definition::kFileDescriptorSet:
+      case Definition::kBuiltin:
+        break;
+      case Definition::kRegisteredId:
+        return absl::InvalidArgumentError(
+            "debugString is unavailable for registered descriptor pools");
+      case Definition::DEFINITION_NOT_SET:
+        return absl::InvalidArgumentError(
+            "descriptor pool definition is missing");
+    }
+  }
+  return absl::OkStatus();
+}
+
 absl::StatusOr<DescriptorPools> BuildDescriptorPools(
     const googlesql::local_service::DescriptorPoolListProto& definitions) {
   DescriptorPools pools;
@@ -443,6 +469,32 @@ absl::Status DeserializeAnalyzerOptions(
         defaults.replace_table_not_found_error_with_tvf_error_if_applicable());
   }
   return absl::OkStatus();
+}
+
+// Rejects analyzer configurations GoogleSQL cannot analyze under, before it
+// reaches them itself.
+//
+// GoogleSQL validates the same combinations, but states them as RET_CHECKs:
+// the request is answered with INTERNAL, whose message carries the file and
+// line of the check inside this build. Neither is right for a configuration
+// the request chose, so the same rules are read here and reported as an
+// invalid argument. Every analysis passes through this, so the answer does not
+// depend on which catalog the request selected.
+absl::Status ValidateAnalyzerConfiguration(
+    const googlesql::AnalyzerOptions& options) {
+  const googlesql::LanguageOptions& language = options.language();
+  if (language.LanguageFeatureEnabled(googlesql::FEATURE_COLLATION_SUPPORT) &&
+      !language.LanguageFeatureEnabled(
+          googlesql::FEATURE_ANNOTATION_FRAMEWORK)) {
+    return absl::InvalidArgumentError(
+        "FEATURE_COLLATION_SUPPORT requires "
+        "FEATURE_ANNOTATION_FRAMEWORK to also be enabled");
+  }
+  const absl::Status status = googlesql::ValidateAnalyzerOptions(options);
+  if (status.ok()) {
+    return absl::OkStatus();
+  }
+  return absl::InvalidArgumentError(status.message());
 }
 
 // Expands a preset into the complete LanguageOptionsProto it names.
@@ -582,6 +634,10 @@ absl::Status AnalyzeWithCatalog(
   if (!status.ok()) {
     return status;
   }
+  status = ValidateAnalyzerConfiguration(options);
+  if (!status.ok()) {
+    return status;
+  }
   // Locations are a typed protocol field. Keep the default prose message free
   // of rendered coordinates, while preserving an explicit display-oriented
   // error mode and attaching the typed payload independently. This frontend
@@ -670,6 +726,8 @@ absl::Status AnalyzeInlineCatalog(
     googlesql::local_service::GoogleSqlLocalServiceImpl* service,
     const googlesql::local_service::AnalyzeRequest& request,
     AnalyzeResult* result) {
+  // ValidateRequest rejects a registered catalog before any request reaches
+  // this far. Repeated here so the function is safe to call on its own.
   if (request.has_registered_catalog_id()) {
     return absl::InvalidArgumentError(
         "debugString is unavailable for registered catalogs");
@@ -822,9 +880,10 @@ absl::Status AnalyzeNamedCatalog(
     return pools.status();
   }
 
-  // AnalyzeImpl validates these options, but named catalogs must be built
-  // first. Validate here as well because SampleCatalogImpl has CHECK-based
-  // loaders that assume a valid analyzer configuration.
+  // AnalyzeWithCatalog validates these options too, but a named catalog has to
+  // be built before it runs, and SampleCatalogImpl has CHECK-based loaders
+  // that assume a valid analyzer configuration. Read the same rules here so an
+  // invalid one is answered rather than fatal.
   googlesql::TypeFactory options_type_factory;
   googlesql::AnalyzerOptions analyzer_options;
   absl::Status options_status =
@@ -833,17 +892,7 @@ absl::Status AnalyzeNamedCatalog(
   if (!options_status.ok()) {
     return options_status;
   }
-  const googlesql::LanguageOptions& analyzer_language_options =
-      analyzer_options.language();
-  if (analyzer_language_options.LanguageFeatureEnabled(
-          googlesql::FEATURE_COLLATION_SUPPORT) &&
-      !analyzer_language_options.LanguageFeatureEnabled(
-          googlesql::FEATURE_ANNOTATION_FRAMEWORK)) {
-    return absl::InvalidArgumentError(
-        "FEATURE_COLLATION_SUPPORT requires "
-        "FEATURE_ANNOTATION_FRAMEWORK to also be enabled");
-  }
-  options_status = googlesql::ValidateAnalyzerOptions(analyzer_options);
+  options_status = ValidateAnalyzerConfiguration(analyzer_options);
   if (!options_status.ok()) {
     return options_status;
   }
@@ -1047,6 +1096,19 @@ absl::Status ValidateRequest(const FrontendRequest& request) {
         return absl::InvalidArgumentError(
             "namedCatalog and request.registeredCatalogId are mutually "
             "exclusive");
+      }
+      // A registered catalog lives inside the local service, so the frontend
+      // cannot reach the catalog that rendering debugString needs. This is a
+      // rule of the protocol rather than of GoogleSQL, so it is reported by
+      // the layer that holds it.
+      if (operation.request().has_registered_catalog_id()) {
+        return absl::InvalidArgumentError(
+            "debugString is unavailable for registered catalogs");
+      }
+      absl::Status pools = ValidateDescriptorPoolList(
+          operation.request().descriptor_pool_list());
+      if (!pools.ok()) {
+        return pools;
       }
       break;
     }
@@ -1267,8 +1329,13 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
           ErrorResponse(conflict, "protocol", line_number, "", identified),
           false);
     }
+    // A line that failed to decode can still say which operation it carries,
+    // and an error names the operation whenever it can be identified.
     return Render(
-        ErrorResponse(parse_status, "proto_json", line_number, "", identified),
+        ErrorResponse(
+            parse_status, "proto_json", line_number,
+            envelope.operations.size() == 1 ? envelope.operations.front() : "",
+            identified),
         false);
   }
   absl::Status id_status = ValidateId(request);

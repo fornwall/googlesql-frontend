@@ -67,60 +67,17 @@ cc_library(
     ],
 )
 
-cc_library(
-    name = "compatibility",
-    srcs = ["compatibility.cc"],
-    hdrs = ["compatibility.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@com_google_absl//absl/cleanup",
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_protobuf//:protobuf",
-        "@googlesql//googlesql/common:options_utils",
-        "@googlesql//googlesql/local_service",
-        "@googlesql//googlesql/local_service:local_service_cc_proto",
-        "@googlesql//googlesql/parser",
-        "@googlesql//googlesql/proto:options_cc_proto",
-        "@googlesql//googlesql/public:builtin_function_options",
-        "@googlesql//googlesql/public:id_string",
-        "@googlesql//googlesql/public:language_options",
-        "@googlesql//googlesql/public:parse_resume_location",
-        "@googlesql//googlesql/public:simple_catalog",
-        "@googlesql//googlesql/resolved_ast",
-        "@googlesql//googlesql/testdata:sample_catalog_impl",
-        "@icu//:icudata_lib",
-        "@icu//:icui18n_lib",
-        "@icu//:icuio_lib",
-        "@icu//:icuuc_lib",
-    ],
-)
-
 cc_binary(
     name = "googlesql-frontend",
     srcs = ["main.cc"],
     linkstatic = True,
     visibility = ["//visibility:public"],
     deps = [
-        ":compatibility",
         ":frontend",
         "@com_google_absl//absl/flags:config",
-        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/flags:parse",
         "@com_google_absl//absl/flags:usage",
-    ],
-)
-
-cc_test(
-    name = "compatibility_test",
-    srcs = ["compatibility_test.cc"],
-    linkstatic = True,
-    deps = [
-        ":compatibility",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_googletest//:gtest_main",
+        "@com_google_absl//absl/log:initialize",
     ],
 )
 

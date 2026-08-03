@@ -73,8 +73,10 @@ resolved-tree rendering:
 rendering without the `AnalyzeResponse` payload.
 
 `registeredCatalogId` remains a recognized `AnalyzeRequest` field for faithful
-ProtoJSON decoding, but this CLI does not register catalogs. Standalone clients
-should use `simpleCatalog`.
+ProtoJSON decoding, but this CLI does not register catalogs, and a request that
+sets it is rejected by the protocol layer. The same holds for a
+`descriptorPoolList` definition that names a `registeredId`, or that names
+nothing at all. Standalone clients should use `simpleCatalog`.
 
 For compatibility with GoogleSQL's named analyzer-test catalogs,
 `analyze.namedCatalog` accepts `CATALOG_NONE` or `CATALOG_SAMPLE`. It is
@@ -477,6 +479,15 @@ response is a `googlesql.AnalyzerOptionsProto` holding a default-constructed
 {"protocolVersion":1,"id":"n1","analyzerOptions":{"response":{"languageOptions":{"nameResolutionMode":"NAME_RESOLUTION_DEFAULT","productMode":"PRODUCT_INTERNAL","errorOnDeprecatedSyntax":false,"supportedStatementKinds":["RESOLVED_QUERY_STMT"]},"errorMessageMode":"ERROR_MESSAGE_ONE_LINE","defaultTimezone":"America/Los_Angeles","pruneUnusedColumns":false,"allowUndeclaredParameters":false,"parameterMode":"PARAMETER_NAMED","statementContext":"CONTEXT_DEFAULT","preserveColumnAliases":true,"createNewColumnForEachProjectedOutput":false,"preserveUnnecessaryCast":false,"replaceTableNotFoundErrorWithTvfErrorIfApplicable":true}}}
 ```
 
+That reply is abridged: it names the scalars this section is about and leaves
+out `allowedHintsAndOptions`, `enabledRewrites`, `rewriteOptions`,
+`defaultAnonFunctionReportFormat`, `defaultAnonKappaValue`, and
+`logImpactOfLateralColumnReferences`, which the real reply also carries.
+`enabledRewrites` is worth a second look: it is the
+`AnalyzerOptions::DefaultRewrites()` set that
+[`analyze.rewrites`](#resolved-ast-rewrites) names as `REWRITES_DEFAULT`, so
+this operation is also how a client reads that baseline as a list.
+
 This is the authoritative reading of the defaults [Analyze](#analyze) restores
 for `request.options` scalars the request leaves unset: `preserveColumnAliases`
 and `replaceTableNotFoundErrorWithTvfErrorIfApplicable` are `true` here, which
@@ -493,9 +504,19 @@ so a client should read the members it needs and ignore the rest.
 
 Malformed JSON, invalid envelopes, invalid ProtoJSON, and GoogleSQL failures
 all produce one error object for that input line. `origin` identifies the layer
-that rejected the request. `statusCode` and `statusName` use the canonical
+that rejected the request, and is one of:
+
+| `origin` | Rejected by |
+|---|---|
+| `proto_json` | the ProtoJSON decoder: malformed JSON, an unknown field, an unknown enum name, or a duplicate object member |
+| `protocol` | this tool's own envelope and operation rules |
+| `googlesql` | GoogleSQL, while parsing or analyzing the supplied SQL |
+| `internal` | this tool, on a failure that indicates a bug in it |
+
+`statusCode` and `statusName` use the canonical
 Abseil status code, while `inputLine` is the physical NDJSON input line number.
-`operation` is present when the operation could be identified. When a
+`operation` is present when the operation could be identified, including on a
+`proto_json` rejection whose line still names exactly one. When a
 GoogleSQL source position can be mapped to the supplied SQL, `location`
 contains its 1-based line and column, 0-based UTF-8 byte offset into that SQL
 buffer, and filename. `location` is absent when no source position is
@@ -511,6 +532,20 @@ The process exits successfully after consuming a valid stream even when some
 lines contain request errors. Nonzero exit status is reserved for process-level
 failures such as invalid command-line arguments, startup failure, or an
 unrecoverable standard-input/standard-output error.
+
+## Command line
+
+The NDJSON protocol is the whole interface. The tool defines no flags of its
+own, takes no positional arguments, and reads no SQL from the command line:
+every request, and every option that shapes it, is a member of the request
+object. Requests are read from standard input and responses are written to
+standard output, so the tool composes with anything that can write a line and
+read one back.
+
+`--version` and `--help` come from Abseil's flag library, as do the flags that
+GoogleSQL and Abseil register for themselves and that `--helpfull` lists. Those
+belong to the linked libraries rather than to this interface; none of them is
+needed to drive the tool, and a request member always wins over one.
 
 ## Versioning
 

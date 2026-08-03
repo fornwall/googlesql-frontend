@@ -316,6 +316,18 @@ rejected_responses = [
             "line": 1,
         },
     },
+    # Every origin the schema names is one the tool emits; "json" is not one of
+    # them, because the ProtoJSON decoder reports its own rejections.
+    {
+        "protocolVersion": 1,
+        "error": {
+            "origin": "json",
+            "statusCode": 3,
+            "statusName": "INVALID_ARGUMENT",
+            "message": "no such origin",
+            "inputLine": 1,
+        },
+    },
     {
         "protocolVersion": 1,
         "error": {
