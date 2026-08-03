@@ -9,6 +9,14 @@ on:
 permissions:
   contents: read
 
+env:
+  # Pinned by major rather than taken from the runner image, so the build does
+  # not drift as that image's default clang moves. The Bazel cache key names
+  # the compiler's full version rather than this one: the autodetected
+  # toolchain is not an input to any action, so a point release within the
+  # major has to invalidate the cached objects explicitly.
+  LLVM_MAJOR: "21"
+
 jobs:
   actionlint:
     runs-on: ubuntu-24.04
@@ -56,7 +64,80 @@ jobs:
           pip install 'jsonschema>=4.23,<5'
           python3 scripts/validate-schemas.py
 
+  # The binary and the tests are built in two jobs that share one Bazel disk
+  # cache. GoogleSQL, ICU and protobuf are ~95% of the compile and are pinned
+  # by MODULE.bazel.lock, so the cache key covers only the inputs that decide
+  # how those are built. A commit touching just frontend/ or docs recompiles
+  # its own handful of objects and reuses everything else.
+  #
+  # Splitting also bounds the damage when a runner is lost mid-build: `build`
+  # has already saved the cache by the time `test` starts, so a failed `test`
+  # rerun starts warm instead of repeating the whole compile.
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+    steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/local/share/boost /usr/local/share/powershell \
+            /usr/share/swift "$AGENT_TOOLSDIRECTORY"
+          df -h /
+      - uses: actions/checkout@v7
+      - name: Install LLVM ${{ env.LLVM_MAJOR }}
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_MAJOR"
+      # Computed once here and published as a job output, so `test` restores
+      # exactly this key and the two cannot drift apart. Everything named here
+      # decides how the pinned dependencies compile; nothing under frontend/ is
+      # named, which is what keeps the key stable across ordinary commits.
+      #
+      # The compiler is named by its full version rather than by LLVM_MAJOR,
+      # because the autodetected toolchain reaches actions by path only: a
+      # point release within the major would otherwise leave objects built by
+      # the previous compiler in the cache and reuse them.
+      - name: Compute the Bazel cache key
+        id: cache-key
+        env:
+          INPUTS_HASH: >-
+            ${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', '.bazelrc',
+            '.bazelversion', 'GOOGLESQL_COMMIT', 'patches/**',
+            'third_party/**') }}
+        run: |
+          cc_id="$("clang-$LLVM_MAJOR" --version | head -n 1 | sha256sum)"
+          printf 'key=bazel-disk-%s-llvm%s-%s-%s\n' \
+            "${{ runner.os }}" "$LLVM_MAJOR" "${cc_id:0:16}" "$INPUTS_HASH" \
+            >> "$GITHUB_OUTPUT"
+      # Restore and save. A hit skips the save, so the cache for a given key is
+      # written once and then only read.
+      - name: Bazel disk cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazel-disk
+          key: ${{ steps.cache-key.outputs.key }}
+      - name: Build the frontend binary
+        run: |
+          pip install 'jsonschema>=4.23,<5'
+          bazel --version
+          "clang-$LLVM_MAJOR" --version
+          bazel build -c opt \
+            --disk_cache="$HOME/.cache/bazel-disk" \
+            --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
+            --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
+            //frontend:googlesql-frontend
+          python3 scripts/check-version.py \
+            --binary bazel-bin/frontend/googlesql-frontend
+          python3 scripts/validate-schemas.py \
+            --binary bazel-bin/frontend/googlesql-frontend
+          df -h /
+
   test:
+    needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -68,26 +149,27 @@ jobs:
             /usr/share/swift "$AGENT_TOOLSDIRECTORY"
           df -h /
       - uses: actions/checkout@v7
-      - name: Install LLVM 21
+      - name: Install LLVM ${{ env.LLVM_MAJOR }}
         run: |
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 21
-      - name: Build and test
+          sudo ./llvm.sh "$LLVM_MAJOR"
+      # Restore only: `build` owns this key and has already populated it. The
+      # test-only objects (googletest and frontend_test, ~30 of the build's
+      # ~4200) recompile each run rather than justify a second multi-GB cache.
+      - name: Restore Bazel disk cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/bazel-disk
+          key: ${{ needs.build.outputs.cache-key }}
+      - name: Run the tests
         run: |
-          pip install 'jsonschema>=4.23,<5'
           bazel --version
-          clang-21 --version
-          bazel build -c opt \
-            --repo_env=CC=/usr/bin/clang-21 \
-            --repo_env=CXX=/usr/bin/clang++-21 \
-            //frontend:googlesql-frontend
+          "clang-$LLVM_MAJOR" --version
           bazel test -c opt \
-            --repo_env=CC=/usr/bin/clang-21 \
-            --repo_env=CXX=/usr/bin/clang++-21 \
+            --disk_cache="$HOME/.cache/bazel-disk" \
+            --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
+            --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
             --test_output=errors \
             //...
-          python3 scripts/check-version.py \
-            --binary bazel-bin/frontend/googlesql-frontend
-          python3 scripts/validate-schemas.py \
-            --binary bazel-bin/frontend/googlesql-frontend
+          df -h /
