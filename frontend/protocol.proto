@@ -79,13 +79,21 @@ message BuiltinFunctionsResult {
   required string debug_string = 2;
 }
 
+message FrontendErrorLocation {
+  required int32 line = 1;
+  required int32 column = 2;
+  required int32 byte_offset = 3;
+  required string filename = 4;
+}
+
 message FrontendError {
   required string origin = 1;
   required int32 status_code = 2;
   required string status_name = 3;
   required string message = 4;
-  required int32 line = 5;
+  required int32 input_line = 5;
   optional string operation = 6;
+  optional FrontendErrorLocation location = 7;
 }
 
 message FrontendResponse {

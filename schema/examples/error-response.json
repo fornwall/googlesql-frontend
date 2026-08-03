@@ -5,8 +5,14 @@
     "origin": "googlesql",
     "statusCode": 3,
     "statusName": "INVALID_ARGUMENT",
-    "message": "Syntax error: Expected end of input but got identifier",
-    "line": 7,
+    "message": "Syntax error: SELECT list must not be empty",
+    "inputLine": 7,
+    "location": {
+      "line": 1,
+      "column": 8,
+      "byteOffset": 7,
+      "filename": ""
+    },
     "operation": "parse"
   }
 }

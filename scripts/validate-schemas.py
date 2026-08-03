@@ -55,6 +55,19 @@ Draft202012Validator.check_schema(response_schema)
 request_validator = Draft202012Validator(request_schema)
 response_validator = Draft202012Validator(response_schema)
 
+response_validator.validate(
+    {
+        "protocolVersion": 1,
+        "error": {
+            "origin": "protocol",
+            "statusCode": 3,
+            "statusName": "INVALID_ARGUMENT",
+            "message": "no source position",
+            "inputLine": 1,
+        },
+    }
+)
+
 request_examples: list[tuple[Path, object]] = []
 for path in sorted(EXAMPLE_DIR.glob("*.json")):
     value = load(path)
@@ -150,6 +163,107 @@ rejected_responses = [
             "statusCode": 3,
             "statusName": "INVALID_ARGUMENT",
             "message": "bad input",
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "error": {
+            "origin": "googlesql",
+            "statusCode": 3,
+            "statusName": "INVALID_ARGUMENT",
+            "message": "old field name",
+            "line": 1,
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "error": {
+            "origin": "googlesql",
+            "statusCode": 3,
+            "statusName": "INVALID_ARGUMENT",
+            "message": "partial location",
+            "inputLine": 1,
+            "location": {"line": 1, "column": 1, "byteOffset": 0},
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "error": {
+            "origin": "googlesql",
+            "statusCode": 3,
+            "statusName": "INVALID_ARGUMENT",
+            "message": "invalid location line",
+            "inputLine": 1,
+            "location": {
+                "line": 0,
+                "column": 1,
+                "byteOffset": 0,
+                "filename": "",
+            },
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "error": {
+            "origin": "googlesql",
+            "statusCode": 3,
+            "statusName": "INVALID_ARGUMENT",
+            "message": "invalid byte offset",
+            "inputLine": 1,
+            "location": {
+                "line": 1,
+                "column": 1,
+                "byteOffset": -1,
+                "filename": "",
+            },
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "error": {
+            "origin": "googlesql",
+            "statusCode": 3,
+            "statusName": "INVALID_ARGUMENT",
+            "message": "missing byte offset",
+            "inputLine": 1,
+            "location": {
+                "line": 1,
+                "column": 1,
+                "filename": "",
+            },
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "error": {
+            "origin": "googlesql",
+            "statusCode": 3,
+            "statusName": "INVALID_ARGUMENT",
+            "message": "invalid location column",
+            "inputLine": 1,
+            "location": {
+                "line": 1,
+                "column": 0,
+                "byteOffset": 0,
+                "filename": "",
+            },
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "error": {
+            "origin": "googlesql",
+            "statusCode": 3,
+            "statusName": "INVALID_ARGUMENT",
+            "message": "extra location member",
+            "inputLine": 1,
+            "location": {
+                "line": 1,
+                "column": 1,
+                "byteOffset": 0,
+                "filename": "",
+                "characterOffset": 0,
+            },
         },
     },
 ]

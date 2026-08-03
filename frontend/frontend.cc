@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "absl/cleanup/cleanup.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/flags/declare.h"
 #include "absl/flags/flag.h"
 #include "absl/status/status.h"
@@ -24,12 +26,20 @@
 #include "googlesql/common/proto_helper.h"
 #include "googlesql/parser/parse_tree_serializer.h"
 #include "googlesql/parser/parser.h"
+#include "googlesql/public/analyzer.h"
 #include "googlesql/public/analyzer_options.h"
+#include "googlesql/public/analyzer_output.h"
 #include "googlesql/public/builtin_function_options.h"
-#include "googlesql/public/id_string.h"
+#include "googlesql/public/error_helpers.h"
+#include "googlesql/public/error_location.pb.h"
+#include "googlesql/public/evaluator.h"
 #include "googlesql/public/language_options.h"
+#include "googlesql/public/parse_location.h"
 #include "googlesql/public/parse_resume_location.h"
+#include "googlesql/public/prepared_expression_constant_evaluator.h"
+#include "googlesql/public/property_graph.h"
 #include "googlesql/public/simple_catalog.h"
+#include "googlesql/public/simple_catalog_util.h"
 #include "googlesql/public/types/type_factory.h"
 #include "googlesql/resolved_ast/resolved_ast.h"
 #include "googlesql/testdata/sample_catalog_impl.h"
@@ -376,48 +386,104 @@ absl::StatusOr<DescriptorPools> BuildDescriptorPools(
   return pools;
 }
 
-void AddGeneratedPoolIfMissing(DescriptorPools* pools) {
-  const auto* generated = google::protobuf::DescriptorPool::generated_pool();
-  if (std::find(pools->ordered.begin(), pools->ordered.end(), generated) ==
-      pools->ordered.end()) {
-    // Resolved trees may reference a builtin enum even when the request did
-    // not explicitly include the builtin pool. local_service appends that
-    // pool after the request pools when serializing such a response.
-    pools->ordered.push_back(generated);
-  }
-}
-
-absl::StatusOr<std::string> AnalyzeDebugStringWithCatalog(
-    const googlesql::local_service::AnalyzeResponse& response,
-    const std::vector<const google::protobuf::DescriptorPool*>& pools,
-    googlesql::SimpleCatalog* catalog) {
-  googlesql::IdStringPool string_pool;
-  googlesql::ResolvedNode::RestoreParams restore_params(
-      pools, catalog, catalog->type_factory(), &string_pool);
-  if (response.has_resolved_statement()) {
-    absl::StatusOr<std::unique_ptr<googlesql::ResolvedStatement>> statement =
-        googlesql::ResolvedStatement::RestoreFrom(response.resolved_statement(),
-                                                  restore_params);
-    if (!statement.ok()) {
-      return statement.status();
-    }
-    return (*statement)->DebugString();
-  }
-  if (response.has_resolved_expression()) {
-    absl::StatusOr<std::unique_ptr<googlesql::ResolvedExpr>> expression =
-        googlesql::ResolvedExpr::RestoreFrom(response.resolved_expression(),
-                                             restore_params);
-    if (!expression.ok()) {
-      return expression.status();
-    }
-    return (*expression)->DebugString();
-  }
-  return absl::InvalidArgumentError("AnalyzeResponse result is missing");
-}
-
-absl::StatusOr<std::string> AnalyzeDebugString(
+absl::Status AnalyzeWithCatalog(
+    googlesql::local_service::GoogleSqlLocalServiceImpl* service,
     const googlesql::local_service::AnalyzeRequest& request,
-    const googlesql::local_service::AnalyzeResponse& response) {
+    const std::vector<const google::protobuf::DescriptorPool*>& pools,
+    googlesql::SimpleCatalog* catalog, AnalyzeResult* result) {
+  googlesql::TypeFactory type_factory;
+  googlesql::AnalyzerOptions options;
+  absl::Status status = googlesql::AnalyzerOptions::Deserialize(
+      request.options(), pools, &type_factory, &options);
+  if (!status.ok()) {
+    return status;
+  }
+  // Locations are a typed protocol field. Keep the default prose message free
+  // of rendered coordinates, while preserving an explicit display-oriented
+  // error mode and attaching the typed payload independently.
+  if (!request.options().has_error_message_mode()) {
+    options.set_error_message_mode(googlesql::ERROR_MESSAGE_WITH_PAYLOAD);
+  }
+  options.set_attach_error_location_payload(true);
+
+  // Keep these outputs alive until the main analysis and serialization have
+  // finished: property graph definitions hold pointers into their resolved
+  // expressions.
+  std::vector<std::unique_ptr<const googlesql::AnalyzerOutput>>
+      property_graph_artifacts;
+  absl::flat_hash_set<const googlesql::PropertyGraph*> graphs;
+  status = catalog->GetPropertyGraphs(&graphs);
+  if (!status.ok()) {
+    return status;
+  }
+  for (const googlesql::PropertyGraph* graph : graphs) {
+    status = googlesql::ResolveGraphPropertyDefinitions(
+        options.language(), graph, catalog, property_graph_artifacts);
+    if (!status.ok()) {
+      return status;
+    }
+  }
+
+  std::unique_ptr<googlesql::PreparedExpressionConstantEvaluator>
+      constant_evaluator;
+  if (request.options().use_constant_evaluator()) {
+    constant_evaluator =
+        std::make_unique<googlesql::PreparedExpressionConstantEvaluator>(
+            googlesql::EvaluatorOptions{}, options.language());
+    options.set_constant_evaluator(constant_evaluator.get());
+  }
+
+  std::unique_ptr<const googlesql::AnalyzerOutput> output;
+  googlesql::local_service::AnalyzeResponse response;
+  std::string sql;
+  switch (request.target_case()) {
+    case googlesql::local_service::AnalyzeRequest::kSqlStatement:
+      sql = request.sql_statement();
+      status = googlesql::AnalyzeStatement(sql, options, catalog, &type_factory,
+                                           &output);
+      break;
+    case googlesql::local_service::AnalyzeRequest::kSqlExpression:
+      sql = request.sql_expression();
+      status = googlesql::AnalyzeExpression(sql, options, catalog,
+                                            &type_factory, &output);
+      break;
+    case googlesql::local_service::AnalyzeRequest::kParseResumeLocation: {
+      googlesql::ParseResumeLocation location =
+          googlesql::ParseResumeLocation::FromProto(
+              request.parse_resume_location());
+      bool at_end_of_input = false;
+      status = googlesql::AnalyzeNextStatement(&location, options, catalog,
+                                               &type_factory, &output,
+                                               &at_end_of_input);
+      if (status.ok()) {
+        sql.assign(location.input().data(), location.input().size());
+        response.set_resume_byte_position(location.byte_position());
+      }
+      break;
+    }
+    case googlesql::local_service::AnalyzeRequest::TARGET_NOT_SET:
+      return absl::InvalidArgumentError("AnalyzeRequest target is missing");
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  if (output == nullptr || output->resolved_node() == nullptr) {
+    return absl::InternalError("analysis result is missing");
+  }
+  status =
+      service->SerializeResolvedOutput(output.get(), pools, sql, &response);
+  if (!status.ok()) {
+    return status;
+  }
+  result->set_debug_string(output->resolved_node()->DebugString());
+  result->mutable_response()->Swap(&response);
+  return absl::OkStatus();
+}
+
+absl::Status AnalyzeInlineCatalog(
+    googlesql::local_service::GoogleSqlLocalServiceImpl* service,
+    const googlesql::local_service::AnalyzeRequest& request,
+    AnalyzeResult* result) {
   if (request.has_registered_catalog_id()) {
     return absl::InvalidArgumentError(
         "debugString is unavailable for registered catalogs");
@@ -427,16 +493,14 @@ absl::StatusOr<std::string> AnalyzeDebugString(
   if (!pools.ok()) {
     return pools.status();
   }
-  AddGeneratedPoolIfMissing(&*pools);
-
   absl::StatusOr<std::unique_ptr<googlesql::SimpleCatalog>> catalog =
       googlesql::SimpleCatalog::Deserialize(request.simple_catalog(),
                                             pools->ordered);
   if (!catalog.ok()) {
     return catalog.status();
   }
-  return AnalyzeDebugStringWithCatalog(response, pools->ordered,
-                                       catalog->get());
+  return AnalyzeWithCatalog(service, request, pools->ordered, catalog->get(),
+                            result);
 }
 
 googlesql::ParserOptions ParserOptionsFrom(
@@ -487,6 +551,24 @@ absl::StatusOr<std::string> NativeParseDebugString(
   }
 
   return absl::InvalidArgumentError("ParseRequest target is missing");
+}
+
+absl::Status RecoverScriptParseError(
+    const googlesql::local_service::ParseRequest& request,
+    const absl::Status& status) {
+  googlesql::ErrorLocation unused_location;
+  if (status.ok() || !request.allow_script() || !request.has_sql_statement() ||
+      googlesql::GetErrorLocation(status, &unused_location)) {
+    return status;
+  }
+
+  googlesql::ParserOptions parser_options =
+      ParserOptionsFrom(request.has_options() ? &request.options() : nullptr);
+  std::unique_ptr<googlesql::ParserOutput> parser_output;
+  absl::Status recovered = googlesql::ParseScript(
+      request.sql_statement(), parser_options,
+      parser_options.error_message_options(), &parser_output);
+  return recovered.ok() ? status : recovered;
 }
 
 absl::Status ParseExtended(const ExtendedParseRequest& request,
@@ -546,7 +628,17 @@ absl::Status ParseExtended(const ExtendedParseRequest& request,
 absl::Status AnalyzeNamedCatalog(
     googlesql::local_service::GoogleSqlLocalServiceImpl* service,
     const AnalyzeOperation& operation, AnalyzeResult* result) {
-  const googlesql::local_service::AnalyzeRequest& request = operation.request();
+  googlesql::local_service::AnalyzeRequest effective_request =
+      operation.request();
+  if (!effective_request.options().has_language_options()) {
+    googlesql::LanguageOptions language_options;
+    language_options.EnableMaximumLanguageFeatures();
+    language_options.SetSupportsAllStatementKinds();
+    language_options.EnableAllReservableKeywords();
+    language_options.Serialize(
+        effective_request.mutable_options()->mutable_language_options());
+  }
+  const googlesql::local_service::AnalyzeRequest& request = effective_request;
   absl::StatusOr<DescriptorPools> pools =
       BuildDescriptorPools(request.descriptor_pool_list());
   if (!pools.ok()) {
@@ -582,22 +674,8 @@ absl::Status AnalyzeNamedCatalog(
   const googlesql::LanguageOptions language_options(
       request.options().language_options());
   auto analyze = [&](googlesql::SimpleCatalog* catalog) -> absl::Status {
-    googlesql::local_service::AnalyzeResponse local_response;
-    absl::Status status =
-        service->AnalyzeImpl(request, pools->ordered, catalog, &local_response);
-    if (!status.ok()) {
-      return status;
-    }
-
-    AddGeneratedPoolIfMissing(&*pools);
-    absl::StatusOr<std::string> debug =
-        AnalyzeDebugStringWithCatalog(local_response, pools->ordered, catalog);
-    if (!debug.ok()) {
-      return debug.status();
-    }
-    result->mutable_response()->Swap(&local_response);
-    result->set_debug_string(*std::move(debug));
-    return absl::OkStatus();
+    return AnalyzeWithCatalog(service, request, pools->ordered, catalog,
+                              result);
   };
 
   switch (operation.named_catalog()) {
@@ -728,6 +806,95 @@ std::string OperationName(const FrontendRequest& request) {
   return "";
 }
 
+struct SqlInput {
+  absl::string_view text;
+  absl::string_view filename;
+};
+
+std::optional<SqlInput> ErrorSqlInput(const FrontendRequest& request) {
+  switch (request.operation_case()) {
+    case FrontendRequest::kAnalyze: {
+      const auto& analyze = request.analyze().request();
+      switch (analyze.target_case()) {
+        case googlesql::local_service::AnalyzeRequest::kSqlStatement:
+          return SqlInput{analyze.sql_statement(), ""};
+        case googlesql::local_service::AnalyzeRequest::kSqlExpression:
+          return SqlInput{analyze.sql_expression(), ""};
+        case googlesql::local_service::AnalyzeRequest::kParseResumeLocation:
+          return SqlInput{analyze.parse_resume_location().input(),
+                          analyze.parse_resume_location().filename()};
+        case googlesql::local_service::AnalyzeRequest::TARGET_NOT_SET:
+          return std::nullopt;
+      }
+      return std::nullopt;
+    }
+    case FrontendRequest::kParse: {
+      const ParseOperation& parse = request.parse();
+      if (parse.has_extended_request()) {
+        return SqlInput{parse.extended_request().sql(), ""};
+      }
+      if (!parse.has_request()) {
+        return std::nullopt;
+      }
+      switch (parse.request().target_case()) {
+        case googlesql::local_service::ParseRequest::kSqlStatement:
+          return SqlInput{parse.request().sql_statement(), ""};
+        case googlesql::local_service::ParseRequest::kParseResumeLocation:
+          return SqlInput{parse.request().parse_resume_location().input(),
+                          parse.request().parse_resume_location().filename()};
+        case googlesql::local_service::ParseRequest::TARGET_NOT_SET:
+          return std::nullopt;
+      }
+      return std::nullopt;
+    }
+    case FrontendRequest::kBuiltinFunctions:
+    case FrontendRequest::OPERATION_NOT_SET:
+      return std::nullopt;
+  }
+  return std::nullopt;
+}
+
+void SetErrorLocation(const absl::Status& status,
+                      const FrontendRequest* request, FrontendError* error) {
+  if (request == nullptr) {
+    return;
+  }
+  googlesql::ErrorLocation location;
+  if (!googlesql::GetErrorLocation(status, &location)) {
+    return;
+  }
+  std::optional<SqlInput> input = ErrorSqlInput(*request);
+  if (!input.has_value() ||
+      (location.has_filename() &&
+       absl::string_view(location.filename()) != input->filename)) {
+    return;
+  }
+
+  googlesql::ParseLocationTranslator translator(input->text);
+  absl::StatusOr<int> byte_offset = translator.GetByteOffsetFromLineAndColumn(
+      location.line(), location.column());
+  if (!byte_offset.ok()) {
+    return;
+  }
+
+  const int64_t line = static_cast<int64_t>(location.line()) +
+                       location.input_start_line_offset();
+  const int64_t column =
+      static_cast<int64_t>(location.column()) +
+      (location.line() == 1 ? location.input_start_column_offset() : 0);
+  if (line < 1 || line > std::numeric_limits<int32_t>::max() || column < 1 ||
+      column > std::numeric_limits<int32_t>::max()) {
+    return;
+  }
+
+  FrontendErrorLocation* output = error->mutable_location();
+  output->set_line(static_cast<int32_t>(line));
+  output->set_column(static_cast<int32_t>(column));
+  output->set_byte_offset(*byte_offset);
+  output->set_filename(location.has_filename() ? location.filename()
+                                               : std::string(input->filename));
+}
+
 FrontendResponse ErrorResponse(const absl::Status& status,
                                absl::string_view origin, int line_number,
                                absl::string_view operation,
@@ -742,10 +909,11 @@ FrontendResponse ErrorResponse(const absl::Status& status,
   error->set_status_code(static_cast<int32_t>(status.code()));
   error->set_status_name(std::string(absl::StatusCodeToString(status.code())));
   error->set_message(status.message());
-  error->set_line(std::max(line_number, 1));
+  error->set_input_line(std::max(line_number, 1));
   if (!operation.empty()) {
     error->set_operation(operation);
   }
+  SetErrorLocation(status, request, error);
   return response;
 }
 
@@ -766,7 +934,7 @@ ProcessResult Render(FrontendResponse response, bool ok) {
       .output =
           fallback_json.ok()
               ? *std::move(fallback_json)
-              : R"({"protocolVersion":1,"error":{"origin":"internal","statusCode":13,"statusName":"INTERNAL","message":"response serialization failed","line":1}})",
+              : R"({"protocolVersion":1,"error":{"origin":"internal","statusCode":13,"statusName":"INTERNAL","message":"response serialization failed","inputLine":1}})",
       .ok = false};
 }
 
@@ -822,19 +990,8 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
       if (request.analyze().has_named_catalog()) {
         status = AnalyzeNamedCatalog(&service_, request.analyze(), result);
       } else {
-        googlesql::local_service::AnalyzeResponse local_response;
-        status = service_.Analyze(request.analyze().request(), &local_response);
-        if (!status.ok()) {
-          break;
-        }
-        absl::StatusOr<std::string> debug =
-            AnalyzeDebugString(request.analyze().request(), local_response);
-        if (!debug.ok()) {
-          status = debug.status();
-          break;
-        }
-        result->mutable_response()->Swap(&local_response);
-        result->set_debug_string(*std::move(debug));
+        status = AnalyzeInlineCatalog(&service_, request.analyze().request(),
+                                      result);
       }
       break;
     }
@@ -854,6 +1011,7 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
         googlesql::local_service::ParseResponse local_response;
         status = service_.Parse(request.parse().request(), &local_response);
         if (!status.ok()) {
+          status = RecoverScriptParseError(request.parse().request(), status);
           break;
         }
         absl::StatusOr<std::string> debug =

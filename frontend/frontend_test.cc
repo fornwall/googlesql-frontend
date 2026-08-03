@@ -86,6 +86,35 @@ TEST(FrontendTest, AnalyzesWithNamedCatalogs) {
       std::string::npos);
 }
 
+TEST(FrontendTest, ResolvedDebugStringRetainsParseLocations) {
+  Frontend frontend;
+  ProcessResult graph = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"GRAPH aml MATCH (a:%) RETURN 1 AS x"}}})json",
+      1);
+  ASSERT_TRUE(graph.ok) << graph.output;
+  EXPECT_NE(graph.output.find(
+                R"("parseLocationRange":{"filename":"","start":19,"end":20})"),
+            std::string::npos)
+      << graph.output;
+  FrontendResponse graph_response = ParseResponse(graph.output);
+  EXPECT_NE(graph_response.analyze().debug_string().find(
+                "GraphWildCardLabel(parse_location=19-20)"),
+            std::string::npos)
+      << graph_response.analyze().debug_string();
+
+  ProcessResult pivot = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT * FROM KeyValue PIVOT (MAX(value) FOR key IN (1))"}}})json",
+      2);
+  ASSERT_TRUE(pivot.ok) << pivot.output;
+  FrontendResponse pivot_response = ParseResponse(pivot.output);
+  const std::string& pivot_debug = pivot_response.analyze().debug_string();
+  EXPECT_NE(pivot_debug.find("parse_location=30-40"), std::string::npos)
+      << pivot_debug;
+  EXPECT_NE(pivot_debug.find("ColumnRef(parse_location=45-48"),
+            std::string::npos)
+      << pivot_debug;
+}
+
 TEST(FrontendTest, SampleCatalogSurvivesSpannerDdlLanguageMode) {
   Frontend frontend;
   ProcessResult result = frontend.ProcessLine(
@@ -266,21 +295,109 @@ TEST(FrontendTest, EnumeratesBuiltinFunctions) {
   EXPECT_GT(response.builtin_functions().response().function_size(), 0);
 }
 
-TEST(FrontendTest, ReportsLineLocalErrors) {
+TEST(FrontendTest, ReportsInputLineLocalErrors) {
   Frontend frontend;
   ProcessResult bad_json = frontend.ProcessLine("{", 7);
   ASSERT_FALSE(bad_json.ok);
   FrontendResponse json_response = ParseResponse(bad_json.output);
-  EXPECT_EQ(json_response.error().line(), 7);
+  EXPECT_EQ(json_response.error().input_line(), 7);
   EXPECT_EQ(json_response.error().origin(), "proto_json");
+  EXPECT_FALSE(json_response.error().has_location());
 
   ProcessResult syntax_error = frontend.ProcessLine(
       R"({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT FROM"}}})",
       8);
   ASSERT_FALSE(syntax_error.ok);
   FrontendResponse sql_response = ParseResponse(syntax_error.output);
-  EXPECT_EQ(sql_response.error().line(), 8);
+  EXPECT_EQ(sql_response.error().input_line(), 8);
   EXPECT_EQ(sql_response.error().origin(), "googlesql");
+  EXPECT_TRUE(sql_response.error().has_location());
+}
+
+TEST(FrontendTest, ReportsTypedParseAndAnalyzeErrorLocations) {
+  Frontend frontend;
+  ProcessResult parse = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"parse-location","parse":{"request":{"sqlStatement":"SELECT FROM"}}})",
+      4);
+  ASSERT_FALSE(parse.ok);
+  FrontendResponse parse_response = ParseResponse(parse.output);
+  ASSERT_TRUE(parse_response.error().has_location()) << parse.output;
+  EXPECT_EQ(parse_response.error().input_line(), 4);
+  EXPECT_EQ(parse_response.error().location().line(), 1);
+  EXPECT_EQ(parse_response.error().location().column(), 8);
+  EXPECT_EQ(parse_response.error().location().byte_offset(), 7);
+  EXPECT_EQ(parse_response.error().location().filename(), "");
+  EXPECT_EQ(parse_response.error().message().find("[at"), std::string::npos);
+
+  ProcessResult analyze = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"analyze-location","analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"SELECT nosuchcolumn"}}})",
+      5);
+  ASSERT_FALSE(analyze.ok);
+  FrontendResponse analyze_response = ParseResponse(analyze.output);
+  ASSERT_TRUE(analyze_response.error().has_location()) << analyze.output;
+  EXPECT_EQ(analyze_response.error().location().line(), 1);
+  EXPECT_EQ(analyze_response.error().location().column(), 8);
+  EXPECT_EQ(analyze_response.error().location().byte_offset(), 7);
+  EXPECT_EQ(analyze_response.error().location().filename(), "");
+  EXPECT_EQ(analyze_response.error().message().find("[at"), std::string::npos);
+
+  ProcessResult one_line = frontend.ProcessLine(
+      R"({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"SELECT nosuchcolumn","options":{"errorMessageMode":"ERROR_MESSAGE_ONE_LINE"}}}})",
+      6);
+  ASSERT_FALSE(one_line.ok);
+  FrontendResponse one_line_response = ParseResponse(one_line.output);
+  ASSERT_TRUE(one_line_response.error().has_location()) << one_line.output;
+  EXPECT_EQ(one_line_response.error().location().line(), 1);
+  EXPECT_EQ(one_line_response.error().location().column(), 8);
+  EXPECT_EQ(one_line_response.error().location().byte_offset(), 7);
+  EXPECT_NE(one_line_response.error().message().find("[at 1:8]"),
+            std::string::npos);
+}
+
+TEST(FrontendTest, ReportsResumeUnicodeAndScriptErrorLocations) {
+  Frontend frontend;
+  ProcessResult resume = frontend.ProcessLine(
+      R"({"protocolVersion":1,"parse":{"request":{"parseResumeLocation":{"input":"SELECT 1;\nSELECT FROM","bytePosition":10,"filename":"query.sql"}}}})",
+      1);
+  ASSERT_FALSE(resume.ok);
+  FrontendResponse resume_response = ParseResponse(resume.output);
+  ASSERT_TRUE(resume_response.error().has_location()) << resume.output;
+  EXPECT_EQ(resume_response.error().location().line(), 2);
+  EXPECT_EQ(resume_response.error().location().column(), 8);
+  EXPECT_EQ(resume_response.error().location().byte_offset(), 17);
+  EXPECT_EQ(resume_response.error().location().filename(), "query.sql");
+
+  ProcessResult unicode = frontend.ProcessLine(
+      R"({"protocolVersion":1,"parse":{"request":{"sqlStatement":"SELECT '😀', FROM"}}})",
+      2);
+  ASSERT_FALSE(unicode.ok);
+  FrontendResponse unicode_response = ParseResponse(unicode.output);
+  ASSERT_TRUE(unicode_response.error().has_location()) << unicode.output;
+  EXPECT_EQ(unicode_response.error().location().line(), 1);
+  EXPECT_EQ(unicode_response.error().location().column(), 17);
+  EXPECT_EQ(unicode_response.error().location().byte_offset(), 19);
+
+  ProcessResult script = frontend.ProcessLine(
+      R"({"protocolVersion":1,"parse":{"request":{"sqlStatement":"BEGIN\nSELECT FROM;\nEND","allowScript":true}}})",
+      3);
+  ASSERT_FALSE(script.ok);
+  FrontendResponse script_response = ParseResponse(script.output);
+  ASSERT_TRUE(script_response.error().has_location()) << script.output;
+  EXPECT_EQ(script_response.error().location().line(), 2);
+  EXPECT_EQ(script_response.error().location().column(), 8);
+  EXPECT_EQ(script_response.error().location().byte_offset(), 13);
+  EXPECT_EQ(script_response.error().location().filename(), "");
+  EXPECT_EQ(script_response.error().message().find("[at"), std::string::npos);
+
+  ProcessResult tab = frontend.ProcessLine(
+      R"({"protocolVersion":1,"parse":{"request":{"sqlStatement":"SELECT\tFROM"}}})",
+      4);
+  ASSERT_FALSE(tab.ok);
+  FrontendResponse tab_response = ParseResponse(tab.output);
+  ASSERT_TRUE(tab_response.error().has_location()) << tab.output;
+  EXPECT_EQ(tab_response.error().location().line(), 1);
+  EXPECT_EQ(tab_response.error().location().column(), 9);
+  EXPECT_EQ(tab_response.error().location().byte_offset(), 7);
 }
 
 TEST(FrontendTest, RejectsUnknownFieldsAndVersions) {
@@ -371,11 +488,11 @@ TEST(FrontendTest, RejectsDuplicateMembersAndInvalidIdsThenContinues) {
   EXPECT_EQ(ParseResponse(valid.output).id(), "after-error");
 }
 
-TEST(FrontendTest, ErrorLineIsAlwaysSchemaValid) {
+TEST(FrontendTest, ErrorInputLineIsAlwaysSchemaValid) {
   Frontend frontend;
   ProcessResult result = frontend.ProcessLine("{", 0);
   ASSERT_FALSE(result.ok);
-  EXPECT_EQ(ParseResponse(result.output).error().line(), 1);
+  EXPECT_EQ(ParseResponse(result.output).error().input_line(), 1);
 }
 
 TEST(FrontendTest, VersionIdentifiesProtocolAndGoogleSql) {

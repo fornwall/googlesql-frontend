@@ -234,6 +234,36 @@
       },
       "additionalProperties": false
     },
+    "errorLocation": {
+      "type": "object",
+      "required": [
+        "line",
+        "column",
+        "byteOffset",
+        "filename"
+      ],
+      "properties": {
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "byteOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "filename": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "error": {
       "type": "object",
       "required": [
@@ -241,7 +271,7 @@
         "statusCode",
         "statusName",
         "message",
-        "line"
+        "inputLine"
       ],
       "properties": {
         "origin": {
@@ -281,9 +311,13 @@
         "message": {
           "type": "string"
         },
-        "line": {
+        "inputLine": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "location": {
+          "$ref": "#/$defs/errorLocation"
         },
         "operation": {
           "enum": [

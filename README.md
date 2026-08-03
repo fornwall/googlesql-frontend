@@ -64,7 +64,9 @@ should use `simpleCatalog`.
 For compatibility with GoogleSQL's named analyzer-test catalogs,
 `analyze.namedCatalog` accepts `CATALOG_NONE` or `CATALOG_SAMPLE`. It is
 mutually exclusive with `request.simpleCatalog` and
-`request.registeredCatalogId`:
+`request.registeredCatalogId`. Named catalogs use GoogleSQL's maximum released
+language features when `request.options.languageOptions` is omitted; an
+explicit `languageOptions` is preserved exactly:
 
 ```json
 {"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT key FROM KeyValue"}}}
@@ -75,7 +77,9 @@ mutually exclusive with `request.simpleCatalog` and
 `parse.request` is a `googlesql.local_service.ParseRequest`. Its target is
 exactly one of `sqlStatement` or `parseResumeLocation`. Set `allowScript` to
 parse a complete script from `sqlStatement`, or use `parseResumeLocation` to
-parse the next statement:
+parse the next statement. A successful resume response includes
+`parse.response.resumeBytePosition`; pass that value back as the next
+`parseResumeLocation.bytePosition` to walk the input one statement at a time:
 
 ```json
 {"protocolVersion":1,"id":"p1","parse":{"request":{"sqlStatement":"SELECT 1"}}}
@@ -127,11 +131,17 @@ response is a `googlesql.local_service.GetBuiltinFunctionsResponse`:
 Malformed JSON, invalid envelopes, invalid ProtoJSON, and GoogleSQL failures
 all produce one error object for that input line. `origin` identifies the layer
 that rejected the request. `statusCode` and `statusName` use the canonical
-Abseil status code, while `line` is the physical NDJSON input line number.
-`operation` is present when the operation could be identified.
+Abseil status code, while `inputLine` is the physical NDJSON input line number.
+`operation` is present when the operation could be identified. When a
+GoogleSQL source position can be mapped to the supplied SQL, `location`
+contains its 1-based line and column, 0-based UTF-8 byte offset into that SQL
+buffer, and filename. `location` is absent when no source position is
+available. By default the message is kept free of rendered `[at line:column]`
+coordinates. An explicit analyzer `errorMessageMode` is preserved, while the
+typed location remains available independently.
 
 ```json
-{"protocolVersion":1,"id":"p2","error":{"origin":"googlesql","statusCode":3,"statusName":"INVALID_ARGUMENT","message":"Syntax error: Expected end of input but got identifier","line":7,"operation":"parse"}}
+{"protocolVersion":1,"id":"p2","error":{"origin":"googlesql","statusCode":3,"statusName":"INVALID_ARGUMENT","message":"Syntax error: SELECT list must not be empty","inputLine":7,"operation":"parse","location":{"line":1,"column":8,"byteOffset":7,"filename":""}}}
 ```
 
 The process exits successfully after consuming a valid stream even when some
