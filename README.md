@@ -1,3 +1,6 @@
+> [!WARNING]
+> **Experimental.** Project is AI-generated and has not seen real world usage.
+
 # googlesql-frontend
 
 `googlesql-frontend` is a machine-readable command-line adapter for the
