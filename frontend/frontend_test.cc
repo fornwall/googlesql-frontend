@@ -86,6 +86,41 @@ TEST(FrontendTest, AnalyzesWithNamedCatalogs) {
       std::string::npos);
 }
 
+TEST(FrontendTest, SampleCatalogSurvivesSpannerDdlLanguageMode) {
+  Frontend frontend;
+  ProcessResult result = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"id":"one","analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT 1","options":{"languageOptions":{"enabledLanguageFeatures":["FEATURE_SPANNER_LEGACY_DDL"]}}}}})json",
+      1);
+  ASSERT_FALSE(result.ok);
+  FrontendResponse response = ParseResponse(result.output);
+  EXPECT_EQ(response.id(), "one");
+  EXPECT_EQ(response.error().origin(), "googlesql");
+  EXPECT_EQ(response.error().status_code(), 3);
+  EXPECT_EQ(response.error().status_name(), "INVALID_ARGUMENT");
+  EXPECT_NE(response.error().message().find("Spanner DDL"), std::string::npos);
+
+  ProcessResult next = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"two","parse":{"request":{"sqlStatement":"SELECT 2"}}})",
+      2);
+  ASSERT_TRUE(next.ok) << next.output;
+  EXPECT_EQ(ParseResponse(next.output).id(), "two");
+}
+
+TEST(FrontendTest, SampleCatalogPrevalidatesAnalyzerOptions) {
+  Frontend frontend;
+  ProcessResult result = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"collation","analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT 1","options":{"languageOptions":{"enabledLanguageFeatures":["FEATURE_COLLATION_SUPPORT"]}}}}})",
+      1);
+  ASSERT_FALSE(result.ok);
+  FrontendResponse response = ParseResponse(result.output);
+  EXPECT_EQ(response.id(), "collation");
+  EXPECT_EQ(response.error().origin(), "googlesql");
+  EXPECT_EQ(response.error().status_code(), 3);
+  EXPECT_EQ(response.error().status_name(), "INVALID_ARGUMENT");
+  EXPECT_NE(response.error().message().find("ANNOTATION_FRAMEWORK"),
+            std::string::npos);
+}
+
 TEST(FrontendTest, RejectsConflictingCatalogSelectors) {
   Frontend frontend;
   ProcessResult result = frontend.ProcessLine(
@@ -262,6 +297,17 @@ TEST(FrontendTest, RejectsUnknownFieldsAndVersions) {
               R"({"protocolVersion":2,"parse":{"request":{"sqlStatement":"SELECT 1"}}})",
               2)
           .ok);
+}
+
+TEST(FrontendTest, EchoesValidIdOnProtoJsonErrors) {
+  Frontend frontend;
+  ProcessResult result = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"bogus","parse":{"request":{"sqlStatement":"SELECT 1","options":{"enabledLanguageFeatures":["FEATURE_NO_SUCH_THING_AT_ALL"]}}}})",
+      1);
+  ASSERT_FALSE(result.ok);
+  FrontendResponse response = ParseResponse(result.output);
+  EXPECT_EQ(response.id(), "bogus");
+  EXPECT_EQ(response.error().origin(), "proto_json");
 }
 
 TEST(FrontendTest, RejectsNestedAndEscapedDuplicateMembers) {

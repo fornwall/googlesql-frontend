@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -18,15 +19,18 @@
 #include "frontend/protocol.pb.h"
 #include "google/protobuf/descriptor.h"
 #include "google/protobuf/message.h"
+#include "google/protobuf/struct.pb.h"
 #include "google/protobuf/util/json_util.h"
 #include "googlesql/common/proto_helper.h"
 #include "googlesql/parser/parse_tree_serializer.h"
 #include "googlesql/parser/parser.h"
+#include "googlesql/public/analyzer_options.h"
 #include "googlesql/public/builtin_function_options.h"
 #include "googlesql/public/id_string.h"
 #include "googlesql/public/language_options.h"
 #include "googlesql/public/parse_resume_location.h"
 #include "googlesql/public/simple_catalog.h"
+#include "googlesql/public/types/type_factory.h"
 #include "googlesql/resolved_ast/resolved_ast.h"
 #include "googlesql/testdata/sample_catalog_impl.h"
 
@@ -549,6 +553,32 @@ absl::Status AnalyzeNamedCatalog(
     return pools.status();
   }
 
+  // AnalyzeImpl validates these options, but named catalogs must be built
+  // first. Validate here as well because SampleCatalogImpl has CHECK-based
+  // loaders that assume a valid analyzer configuration.
+  googlesql::TypeFactory options_type_factory;
+  googlesql::AnalyzerOptions analyzer_options;
+  absl::Status options_status = googlesql::AnalyzerOptions::Deserialize(
+      request.options(), pools->ordered, &options_type_factory,
+      &analyzer_options);
+  if (!options_status.ok()) {
+    return options_status;
+  }
+  const googlesql::LanguageOptions& analyzer_language_options =
+      analyzer_options.language();
+  if (analyzer_language_options.LanguageFeatureEnabled(
+          googlesql::FEATURE_COLLATION_SUPPORT) &&
+      !analyzer_language_options.LanguageFeatureEnabled(
+          googlesql::FEATURE_ANNOTATION_FRAMEWORK)) {
+    return absl::InvalidArgumentError(
+        "FEATURE_COLLATION_SUPPORT requires "
+        "FEATURE_ANNOTATION_FRAMEWORK to also be enabled");
+  }
+  options_status = googlesql::ValidateAnalyzerOptions(analyzer_options);
+  if (!options_status.ok()) {
+    return options_status;
+  }
+
   const googlesql::LanguageOptions language_options(
       request.options().language_options());
   auto analyze = [&](googlesql::SimpleCatalog* catalog) -> absl::Status {
@@ -581,9 +611,17 @@ absl::Status AnalyzeNamedCatalog(
       return analyze(&catalog);
     }
     case CATALOG_SAMPLE: {
+      // SampleCatalogImpl creates its fixture views while it is initialized.
+      // Spanner DDL mode deliberately rejects CREATE VIEW during resolution,
+      // and SampleCatalogImpl turns that initialization error into a CHECK.
+      // The requested language options still reach AnalyzeImpl below; only
+      // disable this parser feature for construction of the sample fixtures.
+      googlesql::LanguageOptions catalog_language_options = language_options;
+      catalog_language_options.DisableLanguageFeature(
+          googlesql::FEATURE_SPANNER_LEGACY_DDL);
       googlesql::SampleCatalogImpl sample_catalog;
       absl::Status status = sample_catalog.LoadCatalogImpl(
-          googlesql::BuiltinFunctionOptions(language_options));
+          googlesql::BuiltinFunctionOptions(catalog_language_options));
       if (!status.ok()) {
         return status;
       }
@@ -609,6 +647,30 @@ absl::Status ValidateId(const FrontendRequest& request) {
         "id must contain between 1 and 256 Unicode characters");
   }
   return absl::OkStatus();
+}
+
+std::optional<FrontendRequest> ParseErrorEnvelope(absl::string_view input) {
+  if (JsonDuplicateMemberScanner(input).Scan() !=
+      JsonScanResult::kNoDuplicate) {
+    return std::nullopt;
+  }
+
+  google::protobuf::Struct object;
+  if (!google::protobuf::util::JsonStringToMessage(input, &object).ok()) {
+    return std::nullopt;
+  }
+  const auto id = object.fields().find("id");
+  if (id == object.fields().end() ||
+      id->second.kind_case() != google::protobuf::Value::kStringValue) {
+    return std::nullopt;
+  }
+
+  FrontendRequest envelope;
+  envelope.set_id(id->second.string_value());
+  if (!ValidateId(envelope).ok()) {
+    return std::nullopt;
+  }
+  return envelope;
 }
 
 absl::Status ValidateRequest(const FrontendRequest& request) {
@@ -714,9 +776,10 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
   FrontendRequest request;
   absl::Status parse_status = ParseJson(input, &request);
   if (!parse_status.ok()) {
-    return Render(
-        ErrorResponse(parse_status, "proto_json", line_number, "", nullptr),
-        false);
+    std::optional<FrontendRequest> envelope = ParseErrorEnvelope(input);
+    return Render(ErrorResponse(parse_status, "proto_json", line_number, "",
+                                envelope.has_value() ? &*envelope : nullptr),
+                  false);
   }
   absl::Status id_status = ValidateId(request);
   if (!id_status.ok()) {
