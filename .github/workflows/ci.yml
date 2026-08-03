@@ -191,14 +191,20 @@ jobs:
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh "$LLVM_MAJOR"
-      # Restore only: `build` owns this key and has already populated it. The
-      # test-only objects (googletest and frontend_test, ~30 of the build's
-      # ~4200) recompile each run rather than justify a second multi-GB cache.
-      - name: Restore Bazel disk cache
-        uses: actions/cache/restore@v4
+      # `test` keeps its own entry, seeded from `build`'s. Testing //... builds
+      # the cc_library targets in a second, position-independent variant that
+      # building the binary alone never produces, so a large part of the graph
+      # compiles under action keys `build` cannot have written: measured, 2129
+      # of 5039 actions hit `build`'s cache and 1499 still ran, 71 minutes of
+      # them. Restoring read-only would repeat that every run, because nothing
+      # would ever persist the variant. Saving under a key of its own makes the
+      # second run onwards a replay; restore-keys is what seeds the first.
+      - name: Bazel disk cache
+        uses: actions/cache@v4
         with:
           path: ~/.cache/bazel-disk
-          key: ${{ needs.build.outputs.cache-key }}
+          key: ${{ needs.build.outputs.cache-key }}-test
+          restore-keys: ${{ needs.build.outputs.cache-key }}
       - name: Run the tests
         run: |
           bazel --version
