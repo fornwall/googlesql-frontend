@@ -63,6 +63,38 @@
       ]
     }
   ],
+  "if": {
+    "required": [
+      "responseOptions"
+    ],
+    "properties": {
+      "responseOptions": {
+        "required": [
+          "omitResponseProto"
+        ],
+        "properties": {
+          "omitResponseProto": {
+            "const": true
+          }
+        }
+      }
+    }
+  },
+  "then": {
+    "$comment": "Only analyze and parse have a payload separable from the rest of their reply; the other operations reject the option.",
+    "anyOf": [
+      {
+        "required": [
+          "analyze"
+        ]
+      },
+      {
+        "required": [
+          "parse"
+        ]
+      }
+    ]
+  },
   "$defs": {
     "responseOptions": {
       "type": "object",

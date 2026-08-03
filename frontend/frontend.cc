@@ -456,9 +456,12 @@ absl::Status DeserializeAnalyzerOptions(
 googlesql::LanguageOptionsProto ExpandLanguageOptionsPreset(
     const LanguageOptionsPreset& preset) {
   googlesql::LanguageOptions expanded;
-  // SetLanguageVersion replaces the enabled feature set rather than adding to
-  // it, so it runs first: when a feature set is named as well, that set is the
-  // one that survives.
+  // SetLanguageVersion replaces the enabled feature set, while the feature-set
+  // calls below only add to it, so the version runs first: naming both layers
+  // the feature set on top of the version's rather than letting the version
+  // erase it. Upstream's LanguageOptionsRequest applies the two in the
+  // opposite order and so narrows to the version instead; README.md records
+  // that as the one configuration the two spellings do not share.
   if (preset.has_language_version()) {
     expanded.SetLanguageVersion(preset.language_version());
   }
@@ -1007,11 +1010,13 @@ std::string OperationName(const FrontendRequest& request) {
 }
 
 // Only analyze and parse carry a payload separable from the rest of their
-// reply. The option-reading operations answer with their response proto and
-// nothing else, so omitting it would leave an empty result rather than a
-// cheaper one.
+// reply. The other operations answer with their response proto and nothing
+// else, so omitting it would leave an empty result rather than a cheaper one.
 absl::Status ValidateResponseOptions(const FrontendRequest& request) {
-  if (!request.response_options().omit_response_proto()) {
+  const FrontendRequest::OperationCase operation = request.operation_case();
+  if (!request.response_options().omit_response_proto() ||
+      operation == FrontendRequest::kAnalyze ||
+      operation == FrontendRequest::kParse) {
     return absl::OkStatus();
   }
   return absl::InvalidArgumentError(
@@ -1020,8 +1025,12 @@ absl::Status ValidateResponseOptions(const FrontendRequest& request) {
                    " reply empty; it applies to analyze and parse only"));
 }
 
+// Checks what an operation says about itself, then the one envelope rule that
+// depends on which operation the request carries.
 absl::Status ValidateRequest(const FrontendRequest& request) {
   switch (request.operation_case()) {
+    case FrontendRequest::OPERATION_NOT_SET:
+      return absl::InvalidArgumentError("operation is required");
     case FrontendRequest::kAnalyze: {
       const AnalyzeOperation& operation = request.analyze();
       if (operation.request().target_case() ==
@@ -1039,7 +1048,7 @@ absl::Status ValidateRequest(const FrontendRequest& request) {
             "namedCatalog and request.registeredCatalogId are mutually "
             "exclusive");
       }
-      return absl::OkStatus();
+      break;
     }
     case FrontendRequest::kParse: {
       const ParseOperation& operation = request.parse();
@@ -1051,26 +1060,23 @@ absl::Status ValidateRequest(const FrontendRequest& request) {
               googlesql::local_service::ParseRequest::TARGET_NOT_SET) {
         return absl::InvalidArgumentError("parse target is required");
       }
-      return absl::OkStatus();
+      break;
     }
     case FrontendRequest::kLanguageOptions: {
-      // preset expresses everything request does, so a line carrying both
-      // states one configuration twice and there is no defensible rule for
-      // combining them.
+      // Each member states a whole configuration, so a line carrying both
+      // states one twice and there is no defensible rule for combining them.
       const LanguageOptionsOperation& operation = request.language_options();
       if (operation.has_request() && operation.has_preset()) {
         return absl::InvalidArgumentError(
             "request and preset are mutually exclusive");
       }
-      return ValidateResponseOptions(request);
+      break;
     }
     case FrontendRequest::kBuiltinFunctions:
     case FrontendRequest::kAnalyzerOptions:
-      return ValidateResponseOptions(request);
-    case FrontendRequest::OPERATION_NOT_SET:
-      return absl::InvalidArgumentError("operation is required");
+      break;
   }
-  return absl::InvalidArgumentError("unknown operation");
+  return ValidateResponseOptions(request);
 }
 
 struct SqlInput {
@@ -1273,7 +1279,7 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
   }
   if (!request.IsInitialized()) {
     return Render(ErrorResponse(MissingRequiredFieldsError(request), "protocol",
-                                line_number, "", &request),
+                                line_number, OperationName(request), &request),
                   false);
   }
   if (request.protocol_version() != kProtocolVersion) {

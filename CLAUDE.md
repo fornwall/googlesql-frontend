@@ -62,9 +62,25 @@ bazelisk build -c opt \
   main analysis, response serialization, and debug rendering.
 - A successful `parseResumeLocation` request returns `resumeBytePosition`; a
   client can feed it back as the next `bytePosition` to walk statements.
-- When named-catalog language options are omitted, use maximum released
-  features, all statement kinds, and all reservable keywords. Preserve
-  explicitly supplied language options exactly.
+- When named-catalog language options are omitted and no
+  `languageOptionsPreset` is given, use maximum released features, all
+  statement kinds, and all reservable keywords. An explicit preset replaces
+  that baseline; the request's own language options are then merged on top of
+  the preset's expansion, and are preserved exactly when there is no preset.
+- One expansion of `LanguageOptionsPreset` serves both applying it (`analyze`,
+  `parse`) and reporting it (`languageOptions.preset`), so what a client reads
+  back cannot drift from what the analyzer and parser were configured with.
+- Analyzer-option scalars the request leaves unset take the values of a
+  default-constructed `AnalyzerOptions`, not the protobuf zero value.
+  `enabled_rewrites` is repeated and carries no presence bit, so its baseline
+  is named by `analyze.rewrites` instead; `REWRITES_AS_REQUESTED` is the
+  default and must keep meaning exactly what the request lists.
+- `responseOptions.omitResponseProto` drops only the serialized AST. It keeps
+  `debugString` and any `resumeBytePosition`, omits a response message left
+  with no field rather than sending an empty object, and is rejected for the
+  operations whose entire reply is the response proto.
+- Blank input lines, including whitespace-only ones, are skipped rather than
+  reported as errors.
 
 ## Validation and release
 

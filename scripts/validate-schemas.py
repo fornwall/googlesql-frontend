@@ -205,6 +205,38 @@ rejected_requests = [
         "parse": {"request": {"sqlStatement": "SELECT 1"}},
     },
     {"protocolVersion": 1, "responseOptions": {"omitResponseProto": True}},
+    # Only analyze and parse have a payload separable from the rest of their
+    # reply, so the other three operations reject the option rather than
+    # answering with nothing.
+    {
+        "protocolVersion": 1,
+        "responseOptions": {"omitResponseProto": True},
+        "builtinFunctions": {"request": {}},
+    },
+    {
+        "protocolVersion": 1,
+        "responseOptions": {"omitResponseProto": True},
+        "languageOptions": {},
+    },
+    {
+        "protocolVersion": 1,
+        "responseOptions": {"omitResponseProto": True},
+        "analyzerOptions": {"request": {}},
+    },
+]
+
+accepted_requests = [
+    # An explicit false, and an empty responseOptions, stay valid everywhere.
+    {
+        "protocolVersion": 1,
+        "responseOptions": {"omitResponseProto": False},
+        "builtinFunctions": {"request": {}},
+    },
+    {
+        "protocolVersion": 1,
+        "responseOptions": {},
+        "analyzerOptions": {"request": {}},
+    },
 ]
 
 rejected_responses = [
@@ -381,6 +413,12 @@ for index, value in enumerate(rejected_requests, start=1):
     if request_validator.is_valid(value):
         sys.exit(f"invalid request case {index} was accepted: {value!r}")
 
+for index, value in enumerate(accepted_requests, start=1):
+    errors = sorted(request_validator.iter_errors(value), key=lambda e: list(e.path))
+    if errors:
+        detail = "\n".join(f"  {error.message}" for error in errors)
+        sys.exit(f"valid request case {index} was rejected:\n{detail}")
+
 for index, value in enumerate(rejected_responses, start=1):
     if response_validator.is_valid(value):
         sys.exit(f"invalid response case {index} was accepted: {value!r}")
@@ -447,6 +485,7 @@ if args.binary is not None:
 
 print(
     f"validated 2 schemas, {len(list(EXAMPLE_DIR.glob('*.json')))} examples, "
+    f"{len(accepted_requests)} extra acceptance cases, "
     f"and {len(rejected_requests) + len(rejected_responses) + 1} rejection cases"
     + (
         f"; exercised {len(request_examples)} requests through {args.binary}"

@@ -676,28 +676,6 @@ TEST(FrontendTest, ReportsPresetExpansionOfThisBuild) {
   const googlesql::LanguageOptionsProto all_kinds =
       expansion(R"({"allStatementKindsSupported":true})", 6);
   EXPECT_EQ(all_kinds.supported_statement_kinds_size(), 0);
-
-  // preset is a superset of upstream's request: the two members they share
-  // expand identically, so a client can move to preset without a change in
-  // meaning.
-  ProcessResult maximum_request = frontend.ProcessLine(
-      R"({"protocolVersion":1,"languageOptions":{"request":{"maximumFeatures":true}}})",
-      7);
-  ASSERT_TRUE(maximum_request.ok) << maximum_request.output;
-  const googlesql::LanguageOptionsProto maximum_upstream =
-      ParseResponse(maximum_request.output).language_options().response();
-  EXPECT_EQ(SortedFeatures(maximum), SortedFeatures(maximum_upstream));
-  EXPECT_EQ(SortedReservedKeywords(maximum),
-            SortedReservedKeywords(maximum_upstream));
-
-  ProcessResult version_request = frontend.ProcessLine(
-      R"({"protocolVersion":1,"languageOptions":{"request":{"languageVersion":"VERSION_1_3"}}})",
-      8);
-  ASSERT_TRUE(version_request.ok) << version_request.output;
-  EXPECT_EQ(
-      SortedFeatures(version),
-      SortedFeatures(
-          ParseResponse(version_request.output).language_options().response()));
 }
 
 TEST(FrontendTest, ReportedPresetExpansionIsTheOneParseAndAnalyzeApply) {
@@ -836,15 +814,58 @@ TEST(FrontendTest, RejectsLanguageOptionsRequestBesidePreset) {
   EXPECT_EQ(ParseResponse(empty_request.output).error().message(),
             "request and preset are mutually exclusive");
 
-  // Neither member remains valid, and still reports GoogleSQL's defaults.
+  // Neither member remains valid: the rule is a conflict between two, not a
+  // requirement for one. ReportsLanguageOptionsOfThisBuild pins what it
+  // reports.
   ProcessResult neither =
       frontend.ProcessLine(R"({"protocolVersion":1,"languageOptions":{}})", 3);
-  ASSERT_TRUE(neither.ok) << neither.output;
-  EXPECT_EQ(ParseResponse(neither.output)
-                .language_options()
-                .response()
-                .enabled_language_features_size(),
-            0);
+  EXPECT_TRUE(neither.ok) << neither.output;
+}
+
+TEST(FrontendTest, PresetAndUpstreamRequestAgreeExceptOnNamingBothSets) {
+  Frontend frontend;
+  auto expansion = [&frontend](const std::string& operation, int line) {
+    ProcessResult result = frontend.ProcessLine(
+        R"({"protocolVersion":1,"languageOptions":)" + operation + "}", line);
+    EXPECT_TRUE(result.ok) << result.output;
+    return ParseResponse(result.output).language_options().response();
+  };
+
+  // preset is a superset of upstream's LanguageOptionsRequest: the two members
+  // they share expand identically, so a client can move to preset without a
+  // change in meaning.
+  const googlesql::LanguageOptionsProto maximum =
+      expansion(R"({"preset":{"features":"LANGUAGE_FEATURES_MAXIMUM"}})", 1);
+  const googlesql::LanguageOptionsProto maximum_upstream =
+      expansion(R"({"request":{"maximumFeatures":true}})", 2);
+  EXPECT_EQ(SortedFeatures(maximum), SortedFeatures(maximum_upstream));
+  EXPECT_EQ(SortedReservedKeywords(maximum),
+            SortedReservedKeywords(maximum_upstream));
+
+  const googlesql::LanguageOptionsProto version =
+      expansion(R"({"preset":{"languageVersion":"VERSION_1_3"}})", 3);
+  EXPECT_EQ(SortedFeatures(version),
+            SortedFeatures(expansion(
+                R"({"request":{"languageVersion":"VERSION_1_3"}})", 4)));
+
+  // The one configuration they do not share. GoogleSQL's own request enables
+  // the maximum set first and then lets SetLanguageVersion replace it, so
+  // naming both narrows to the version. The preset applies the version first
+  // and adds the named set on top, so naming both keeps the wider set. The two
+  // sets differ, which is what keeps the comparison from passing vacuously.
+  ASSERT_GT(version.enabled_language_features_size(), 0);
+  ASSERT_GT(maximum.enabled_language_features_size(),
+            version.enabled_language_features_size());
+  EXPECT_EQ(
+      SortedFeatures(expansion(
+          R"({"request":{"maximumFeatures":true,"languageVersion":"VERSION_1_3"}})",
+          5)),
+      SortedFeatures(version));
+  EXPECT_EQ(
+      SortedFeatures(expansion(
+          R"({"preset":{"features":"LANGUAGE_FEATURES_MAXIMUM","languageVersion":"VERSION_1_3"}})",
+          6)),
+      SortedFeatures(maximum));
 }
 
 TEST(FrontendTest, ReportsAnalyzerOptionDefaultsOfThisBuild) {
@@ -1123,6 +1144,20 @@ TEST(FrontendTest, OmitsResponseProtoWhileKeepingDebugString) {
       << omitted_parse.output;
   EXPECT_LT(omitted_parse.output.size() * 3, full_parse.output.size())
       << omitted_parse.output.size() << " of " << full_parse.output.size();
+
+  // parsedScript is the other arm of the payload oneof, and the option clears
+  // the oneof rather than one named member of it.
+  ProcessResult omitted_script = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"parse":{"request":{"sqlStatement":"DECLARE x INT64; SET x = 1;","allowScript":true}}})",
+      6);
+  ASSERT_TRUE(omitted_script.ok) << omitted_script.output;
+  FrontendResponse omitted_script_response =
+      ParseResponse(omitted_script.output);
+  EXPECT_FALSE(omitted_script_response.parse().has_response());
+  EXPECT_NE(omitted_script_response.parse().debug_string().find("Script"),
+            std::string::npos);
+  EXPECT_EQ(omitted_script.output.find("parsedScript"), std::string::npos)
+      << omitted_script.output;
 }
 
 TEST(FrontendTest, OmitResponseProtoPreservesResumeBytePosition) {
@@ -1382,18 +1417,24 @@ TEST(FrontendTest, ReportsResumeUnicodeAndScriptErrorLocations) {
 
 TEST(FrontendTest, RejectsUnknownFieldsAndVersions) {
   Frontend frontend;
-  EXPECT_FALSE(
-      frontend
-          .ProcessLine(
-              R"({"protocolVersion":1,"wat":{},"parse":{"request":{"sqlStatement":"SELECT 1"}}})",
-              1)
-          .ok);
-  EXPECT_FALSE(
-      frontend
-          .ProcessLine(
-              R"({"protocolVersion":2,"parse":{"request":{"sqlStatement":"SELECT 1"}}})",
-              2)
-          .ok);
+  ProcessResult unknown_field = frontend.ProcessLine(
+      R"({"protocolVersion":1,"wat":{},"parse":{"request":{"sqlStatement":"SELECT 1"}}})",
+      1);
+  ASSERT_FALSE(unknown_field.ok);
+  FrontendResponse unknown_response = ParseResponse(unknown_field.output);
+  EXPECT_EQ(unknown_response.error().origin(), "proto_json");
+  EXPECT_NE(unknown_response.error().message().find("'wat'"), std::string::npos)
+      << unknown_field.output;
+
+  ProcessResult version = frontend.ProcessLine(
+      R"({"protocolVersion":2,"parse":{"request":{"sqlStatement":"SELECT 1"}}})",
+      2);
+  ASSERT_FALSE(version.ok);
+  FrontendResponse version_response = ParseResponse(version.output);
+  EXPECT_EQ(version_response.error().origin(), "protocol");
+  EXPECT_EQ(version_response.error().message(),
+            "unsupported protocolVersion: 2; expected 1");
+  EXPECT_EQ(version_response.error().operation(), "parse");
 }
 
 TEST(FrontendTest, NamesMissingRequiredProtocolFields) {
@@ -1405,6 +1446,9 @@ TEST(FrontendTest, NamesMissingRequiredProtocolFields) {
   EXPECT_EQ(no_version_response.error().origin(), "protocol");
   EXPECT_EQ(no_version_response.error().message(),
             "protocolVersion is required");
+  // The operation is still identifiable, so the error names it, as every other
+  // protocol-layer rejection of the same line does.
+  EXPECT_EQ(no_version_response.error().operation(), "parse");
 
   // Every other required field reads the same way, in the lower camel case
   // spelling the JSON protocol uses rather than the protobuf field name.

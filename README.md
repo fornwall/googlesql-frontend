@@ -12,11 +12,11 @@ evaluator, execute queries, read table contents, or return rows.
 
 ## Protocol
 
-Each non-blank input line is one request. The corresponding output line is one
-success or error response, in the same order. A line-local error does not stop
-the stream. Blank input lines are ignored, including lines that contain only
-whitespace. Standard output is reserved for protocol responses; process
-diagnostics belong on standard error.
+Each non-blank input line is one request; a line holding nothing but whitespace
+is blank and is skipped. The corresponding output line is one success or error
+response, in the same order. A line-local error does not stop the stream.
+Standard output is reserved for protocol responses; process diagnostics belong
+on standard error.
 
 Every request contains `protocolVersion: 1`, an optional string `id` of 1 to
 256 Unicode characters, an optional
@@ -33,8 +33,8 @@ representations of GoogleSQL local-service requests. Builtin-function options
 and successful responses likewise use canonical ProtoJSON for their GoogleSQL
 messages. Extended parser roots use the explicitly documented frontend
 messages below. Among other ProtoJSON rules, field names use lower camel case,
-enums normally use their symbolic names, bytes use base64, and 64-bit integers
-are decimal JSON strings rather than JSON numbers.
+bytes use base64, and 64-bit integers are decimal JSON strings rather than JSON
+numbers.
 
 The protocol schemas are [schema/request.schema.json](schema/request.schema.json)
 and [schema/response.schema.json](schema/response.schema.json). They strictly
@@ -44,6 +44,12 @@ messages remain open to compatible upstream additions; the protobuf decoder is
 the authoritative validator for those evolving messages and rejects unknown
 fields. Duplicate members in any JSON object are rejected rather than silently
 using the first or last value.
+
+Write enum members as their symbolic names. ProtoJSON also accepts an enum's
+numeric value, but a number that names no value of that enum is discarded as an
+unknown field, so the request is answered as though the member had been
+omitted rather than rejected. The schemas accept only the symbolic names for
+this protocol's own enums, which is where that is caught.
 
 ### Analyze
 
@@ -76,7 +82,8 @@ mutually exclusive with `request.simpleCatalog` and
 `request.registeredCatalogId`. Named catalogs use GoogleSQL's maximum released
 language features, all statement kinds, and all reservable keywords when
 neither `request.options.languageOptions` nor `analyze.languageOptionsPreset`
-is given; an explicit `languageOptions` is preserved exactly:
+is given. An explicit `languageOptions` is otherwise used exactly as sent, or
+merged over a preset as [described below](#language-option-presets):
 
 ```json
 {"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT key FROM KeyValue"}}}
@@ -123,11 +130,11 @@ expressible:
 | `REWRITES_DEFAULT` | GoogleSQL's `AnalyzerOptions::DefaultRewrites()`, plus the ones the request names |
 
 It follows the same "preset plus explicit additions" shape as
-`languageOptionsPreset`: `REWRITES_DEFAULT` is a starting point that
-`enabledRewrites` adds to, never a set that `enabledRewrites` replaces. Naming
-a rewrite the baseline already contains is harmless, because the enabled
-rewrites are a set. To subtract from the default set, list the rewrites you
-want explicitly and leave `rewrites` alone.
+[`languageOptionsPreset`](#language-option-presets): `REWRITES_DEFAULT` is a
+starting point that `enabledRewrites` adds to, never a set that
+`enabledRewrites` replaces. Naming a rewrite the baseline already contains is
+harmless, because the enabled rewrites are a set. To subtract from the default
+set, list the rewrites you want explicitly and leave `rewrites` alone.
 
 The field applies to named and inline catalogs alike. Its default value is the
 behaviour every earlier request already had, so adding it changes no existing
@@ -185,8 +192,9 @@ merge semantics, and is worth stating exactly:
   which GoogleSQL reads as "all kinds". Naming `supportedStatementKinds` in the
   same request therefore narrows the set to exactly those kinds instead of
   widening it.
-- `languageVersion` and a non-default `features` both choose a feature set, and
-  `features` is applied second, so it wins. Use one or the other.
+- `languageVersion` and `features` both choose a feature set. The version is
+  applied first and `features` only adds to what it leaves, so naming both
+  keeps the wider set. Name one or the other.
 - A language version enables only features annotated with that version.
   Unversioned features such as `FEATURE_ANALYTIC_FUNCTIONS` are not part of any
   version and have to be named explicitly.
@@ -331,7 +339,8 @@ always absent under the option.
 
 `builtinFunctions`, `languageOptions`, and `analyzerOptions` answer with their
 response proto and nothing else, so omitting it would leave an empty reply
-rather than a cheaper one. They reject the combination at the protocol layer:
+rather than a cheaper one. The request schema rules the combination out, and
+the protocol layer rejects it:
 
 ```json
 {"protocolVersion":1,"error":{"origin":"protocol","statusCode":3,"statusName":"INVALID_ARGUMENT","message":"responseOptions.omitResponseProto would leave the builtinFunctions reply empty; it applies to analyze and parse only","inputLine":1,"operation":"builtinFunctions"}}
@@ -415,12 +424,12 @@ features as a set.
 
 `languageOptions.preset` is the same
 [`LanguageOptionsPreset`](#language-option-presets) that `analyze` and `parse`
-accept, expanded and reported instead of applied. It covers everything
-`request` does — `features: LANGUAGE_FEATURES_MAXIMUM` is `maximumFeatures`,
-and `languageVersion` is the same member — and adds
-`allReservableKeywordsReserved` and `allStatementKindsSupported`, which
-upstream's request has no room for. Every configuration a preset can name is
-therefore one this operation can report:
+accept, expanded and reported instead of applied. Its members cover those of
+`request` — `features: LANGUAGE_FEATURES_MAXIMUM` is `maximumFeatures`, and
+`languageVersion` is the same member — and add `allReservableKeywordsReserved`
+and `allStatementKindsSupported`, which upstream's request has no room for.
+Every configuration a preset can name is therefore one this operation can
+report:
 
 ```json
 {"protocolVersion":1,"id":"l2","languageOptions":{"preset":{"allReservableKeywordsReserved":true,"allStatementKindsSupported":true}}}
@@ -440,6 +449,13 @@ second implementation of the same rules. A reported expansion, sent back as
 `analyze.request.options.languageOptions` or as `parse.request.options`,
 therefore configures exactly the analysis or the parse that naming the preset
 would have configured.
+
+The two spellings agree on every configuration but one: setting
+`maximumFeatures` and `languageVersion` together makes `request` narrow to the
+version, because GoogleSQL enables the maximum set first and then lets
+`SetLanguageVersion` replace it, while the equivalent preset keeps the wider
+set for the reason given above. Name one of the two in either spelling and the
+question does not arise.
 
 `request` and `preset` are mutually exclusive, because they describe one
 configuration at two widths rather than two configurations to combine:
@@ -505,8 +521,8 @@ attributed to their implementation.
 
 ## Validating the schemas
 
-The examples under `schema/examples` and important negative cases are checked
-with a Draft 2020-12 validator:
+The examples under `schema/examples`, and important cases that must be accepted
+or rejected, are checked with a Draft 2020-12 validator:
 
 ```sh
 uv run --with 'jsonschema>=4.23,<5' python3 scripts/validate-schemas.py
