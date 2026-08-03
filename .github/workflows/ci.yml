@@ -73,9 +73,17 @@ jobs:
   # Splitting also bounds the damage when a runner is lost mid-build: `build`
   # has already saved the cache by the time `test` starts, so a failed `test`
   # rerun starts warm instead of repeating the whole compile.
+  #
+  # Both jobs compile at three quarters of the runner's cores rather than all
+  # of them, to keep concurrent clang processes from reaching the runner's
+  # memory limit. --local_ram_resources is not the lever it looks like: local
+  # actions carry a fixed default memory estimate, so on a 16 GB runner the
+  # job count binds long before it does. Giving up a quarter of the
+  # parallelism is what actually lowers the peak, and the timeouts below are
+  # raised from 180 to absorb the slower cold build that costs.
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     outputs:
       cache-key: ${{ steps.cache-key.outputs.key }}
     steps:
@@ -86,6 +94,20 @@ jobs:
             /usr/local/.ghcup /usr/local/share/boost /usr/local/share/powershell \
             /usr/share/swift "$AGENT_TOOLSDIRECTORY"
           df -h /
+      # A few GoogleSQL translation units are very large: the 36 objects in
+      # resolved_ast average 2.3 MB, and clang's peak RSS on those under -O2 is
+      # what puts a 16 GB runner within reach of its limit. Swap absorbs the
+      # spike a concurrency limit cannot, since one compile -- or the final
+      # link of an 86 MB binary -- can be the single action that overruns.
+      # /mnt is the runner's large temp disk, away from the Bazel cache on /.
+      - name: Add swap
+        run: |
+          free -h
+          sudo fallocate -l 8G /mnt/swapfile-ci
+          sudo chmod 600 /mnt/swapfile-ci
+          sudo mkswap /mnt/swapfile-ci
+          sudo swapon /mnt/swapfile-ci
+          free -h
       - uses: actions/checkout@v7
       - name: Install LLVM ${{ env.LLVM_MAJOR }}
         run: |
@@ -126,6 +148,7 @@ jobs:
           bazel --version
           "clang-$LLVM_MAJOR" --version
           bazel build -c opt \
+            '--jobs=HOST_CPUS*.75' \
             --disk_cache="$HOME/.cache/bazel-disk" \
             --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
             --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
@@ -139,7 +162,7 @@ jobs:
   test:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
     steps:
       - name: Free disk space
         run: |
@@ -148,6 +171,20 @@ jobs:
             /usr/local/.ghcup /usr/local/share/boost /usr/local/share/powershell \
             /usr/share/swift "$AGENT_TOOLSDIRECTORY"
           df -h /
+      # A few GoogleSQL translation units are very large: the 36 objects in
+      # resolved_ast average 2.3 MB, and clang's peak RSS on those under -O2 is
+      # what puts a 16 GB runner within reach of its limit. Swap absorbs the
+      # spike a concurrency limit cannot, since one compile -- or the final
+      # link of an 86 MB binary -- can be the single action that overruns.
+      # /mnt is the runner's large temp disk, away from the Bazel cache on /.
+      - name: Add swap
+        run: |
+          free -h
+          sudo fallocate -l 8G /mnt/swapfile-ci
+          sudo chmod 600 /mnt/swapfile-ci
+          sudo mkswap /mnt/swapfile-ci
+          sudo swapon /mnt/swapfile-ci
+          free -h
       - uses: actions/checkout@v7
       - name: Install LLVM ${{ env.LLVM_MAJOR }}
         run: |
@@ -167,6 +204,7 @@ jobs:
           bazel --version
           "clang-$LLVM_MAJOR" --version
           bazel test -c opt \
+            '--jobs=HOST_CPUS*.75' \
             --disk_cache="$HOME/.cache/bazel-disk" \
             --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
             --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
