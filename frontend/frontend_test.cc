@@ -1584,7 +1584,8 @@ TEST(FrontendTest, ErrorInputLineIsAlwaysSchemaValid) {
 
 TEST(FrontendTest, VersionIdentifiesProtocolAndGoogleSql) {
   const std::string version = VersionString();
-  EXPECT_NE(version.find("googlesql-frontend 0.1.0"), std::string::npos);
+  EXPECT_NE(version.find("googlesql-frontend " + std::string(kVersion)),
+            std::string::npos);
   EXPECT_NE(version.find("protocol 1"), std::string::npos);
   EXPECT_NE(version.find(kGoogleSqlCommit), std::string::npos);
 }
