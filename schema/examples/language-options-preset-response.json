@@ -1,0 +1,18 @@
+{
+  "protocolVersion": 1,
+  "id": "language-options-preset-1",
+  "languageOptions": {
+    "response": {
+      "nameResolutionMode": "NAME_RESOLUTION_DEFAULT",
+      "productMode": "PRODUCT_INTERNAL",
+      "errorOnDeprecatedSyntax": false,
+      "reservedKeywords": [
+        "ALIGN",
+        "QUALIFY",
+        "GRAPH_TABLE",
+        "MATCH_RECOGNIZE",
+        "PER"
+      ]
+    }
+  }
+}

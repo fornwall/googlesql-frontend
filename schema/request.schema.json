@@ -223,7 +223,7 @@
     },
     "languageOptionsPreset": {
       "type": "object",
-      "description": "A named starting point for the language options, merged under the request's own languageOptions.",
+      "description": "A named starting point for the language options. On analyze and parse it is merged under the request's own languageOptions; on languageOptions it is the configuration to expand and report.",
       "properties": {
         "features": {
           "enum": [
@@ -243,6 +243,13 @@
         }
       },
       "additionalProperties": false
+    },
+    "rewriteSet": {
+      "description": "The resolved-AST rewrite baseline the analyzer starts from, before request.options.enabledRewrites is added to it. REWRITES_AS_REQUESTED, the default, enables exactly the rewrites that list names. REWRITES_DEFAULT enables the set a default-constructed GoogleSQL AnalyzerOptions carries.",
+      "enum": [
+        "REWRITES_AS_REQUESTED",
+        "REWRITES_DEFAULT"
+      ]
     },
     "functionSignatureId": {
       "description": "A ProtoJSON enum name or its accepted numeric representation.",
@@ -311,6 +318,9 @@
         },
         "languageOptionsPreset": {
           "$ref": "#/$defs/languageOptionsPreset"
+        },
+        "rewrites": {
+          "$ref": "#/$defs/rewriteSet"
         }
       },
       "additionalProperties": false,
@@ -407,12 +417,22 @@
     },
     "languageOptionsOperation": {
       "type": "object",
+      "description": "Reports the language options of this build. At most one of request and preset; neither reports GoogleSQL's defaults.",
       "properties": {
         "request": {
           "$ref": "#/$defs/languageOptionsRequest"
+        },
+        "preset": {
+          "$ref": "#/$defs/languageOptionsPreset"
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "not": {
+        "required": [
+          "request",
+          "preset"
+        ]
+      }
     },
     "analyzerOptionsOperation": {
       "type": "object",

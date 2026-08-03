@@ -230,7 +230,7 @@
     },
     "analyzeSuccess": {
       "type": "object",
-      "description": "response is absent only when the request set responseOptions.omitResponseProto and the analysis left no resumeBytePosition to carry.",
+      "description": "Both members render the same resolved AST, after the rewrites the request enabled through analyze.rewrites and request.options.enabledRewrites. response is absent only when the request set responseOptions.omitResponseProto and the analysis left no resumeBytePosition to carry.",
       "required": [
         "debugString"
       ],

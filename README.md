@@ -102,9 +102,57 @@ The one deliberate exception is `errorMessageMode`: an explicit mode is
 preserved, while an absent one selects the unpositioned error prose described
 under [Errors](#errors) instead of GoogleSQL's default.
 
-`enabledRewrites` is a repeated field, where an omitted list and an explicitly
-empty one cannot be told apart, so it keeps GoogleSQL's deserialization
-meaning: no resolved-AST rewrites are applied unless the request names them.
+### Resolved-AST rewrites
+
+The analyzer-option defaults rule above cannot reach
+`request.options.enabledRewrites`, and the reason is structural rather than an
+oversight. It is a *repeated* field, so it carries no presence bit: an omitted
+list and an explicitly empty one are the same bytes on the wire, and no amount
+of inspection can tell "I did not say" from "I want none". GoogleSQL's
+deserializer resolves that ambiguity towards none, which is not the set a
+default-constructed `AnalyzerOptions` carries. Restoring the C++ default the
+way the scalar options are restored would silently take "no rewrites" away from
+every client that relies on it.
+
+`analyze.rewrites` names the baseline instead, so both meanings stay
+expressible:
+
+| Value | Rewrites applied |
+|---|---|
+| `REWRITES_AS_REQUESTED` (the default) | exactly the ones `request.options.enabledRewrites` names; an omitted or empty list applies none |
+| `REWRITES_DEFAULT` | GoogleSQL's `AnalyzerOptions::DefaultRewrites()`, plus the ones the request names |
+
+It follows the same "preset plus explicit additions" shape as
+`languageOptionsPreset`: `REWRITES_DEFAULT` is a starting point that
+`enabledRewrites` adds to, never a set that `enabledRewrites` replaces. Naming
+a rewrite the baseline already contains is harmless, because the enabled
+rewrites are a set. To subtract from the default set, list the rewrites you
+want explicitly and leave `rewrites` alone.
+
+The field applies to named and inline catalogs alike. Its default value is the
+behaviour every earlier request already had, so adding it changes no existing
+answer. `REWRITE_PIVOT` is in the default set, which makes it a convenient way
+to see the difference:
+
+```json
+{"protocolVersion":1,"id":"r1","analyze":{"namedCatalog":"CATALOG_SAMPLE","rewrites":"REWRITES_DEFAULT","request":{"sqlStatement":"SELECT * FROM KeyValue PIVOT (MAX(Value) FOR Key IN (1))"}}}
+```
+
+```json
+{"protocolVersion":1,"id":"r1","analyze":{"response":{"resolvedStatement":{"resolvedQueryStmtNode":{}}},"debugString":"QueryStmt\n+-output_column_list=\n| +-$pivot._1#4 AS _1 [STRING]\n+-query=\n  +-ProjectScan\n    +-input_scan=\n      +-AggregateScan..."}}
+```
+
+Without `rewrites`, the same statement resolves to a `PivotScan` carrying
+`pivot_expr_list`, `for_expr`, and `pivot_column_list`. With
+`REWRITES_DEFAULT` it resolves to the `AggregateScan` over a `ProjectScan`
+above, which compares a `$pivot.$pivot_value` column using
+`$is_not_distinct_from`. `debugString` and the `response` payload always agree,
+because both render the tree the analyzer produced after rewriting.
+
+The rewrite baseline is an `analyze` member only, unlike
+`languageOptionsPreset`. Rewriters run over the resolved AST, and `parse` stops
+at the parse tree; its `request.options` is a `LanguageOptionsProto`, which has
+no `enabledRewrites` member for a baseline to extend.
 
 ### Language option presets
 
@@ -179,6 +227,11 @@ into `parse.request.options` or into `parse.extendedRequest.options`:
 Without the preset that statement is a *syntax* error, `QUALIFY clause must be
 used in conjunction with WHERE or GROUP BY or HAVING clause`, which reads as a
 dialect difference rather than as a configuration choice.
+
+A preset is also readable: [`languageOptions.preset`](#language-and-analyzer-options)
+reports the `LanguageOptionsProto` any of these presets expands to on this
+build, so a configuration that was named rather than listed can still be
+recorded in full.
 
 ### Parse
 
@@ -339,11 +392,13 @@ itself. They exist so a client can read the feature set and the analyzer
 defaults from the tool's own vintage instead of re-deriving them from a source
 checkout that may be pinned to a different commit.
 
+`languageOptions` takes at most one of two members, and reports a
+`googlesql.LanguageOptionsProto` either way. Both are optional, so
+`{"languageOptions":{}}` reports GoogleSQL's defaults.
+
 `languageOptions.request` is a
 `googlesql.local_service.LanguageOptionsRequest`, with the optional members
-`maximumFeatures` and `languageVersion`. The response is a
-`googlesql.LanguageOptionsProto`. The request message itself is optional, so
-`{"languageOptions":{}}` reports GoogleSQL's defaults:
+`maximumFeatures` and `languageVersion`:
 
 ```json
 {"protocolVersion":1,"id":"l1","languageOptions":{"request":{"maximumFeatures":true}}}
@@ -356,11 +411,42 @@ checkout that may be pinned to a different commit.
 `enabledLanguageFeatures` is truncated above; the real reply names every
 feature in the requested set. It is a set, and GoogleSQL serializes it from an
 unordered container, so treat the member order as unspecified and compare the
-features as a set. The expansion is the one `languageOptionsPreset.features`
-applies, so this operation is how a preset is recorded or audited rather than
-guessed. Upstream's request carries only these two members: reservable keywords
-and statement kinds are reachable through `languageOptionsPreset`, not through
-this operation.
+features as a set.
+
+`languageOptions.preset` is the same
+[`LanguageOptionsPreset`](#language-option-presets) that `analyze` and `parse`
+accept, expanded and reported instead of applied. It covers everything
+`request` does — `features: LANGUAGE_FEATURES_MAXIMUM` is `maximumFeatures`,
+and `languageVersion` is the same member — and adds
+`allReservableKeywordsReserved` and `allStatementKindsSupported`, which
+upstream's request has no room for. Every configuration a preset can name is
+therefore one this operation can report:
+
+```json
+{"protocolVersion":1,"id":"l2","languageOptions":{"preset":{"allReservableKeywordsReserved":true,"allStatementKindsSupported":true}}}
+```
+
+```json
+{"protocolVersion":1,"id":"l2","languageOptions":{"response":{"nameResolutionMode":"NAME_RESOLUTION_DEFAULT","productMode":"PRODUCT_INTERNAL","errorOnDeprecatedSyntax":false,"reservedKeywords":["ALIGN","QUALIFY","GRAPH_TABLE","MATCH_RECOGNIZE","PER"]}}}
+```
+
+That reply is how `allStatementKindsSupported` is read as well as written:
+GoogleSQL spells "every statement kind" as an *empty* `supportedStatementKinds`
+list, and an empty repeated field is omitted from the response object, so the
+absent member is the answer.
+
+The expansion is produced by the code path `analyze` and `parse` run, not by a
+second implementation of the same rules. A reported expansion, sent back as
+`analyze.request.options.languageOptions` or as `parse.request.options`,
+therefore configures exactly the analysis or the parse that naming the preset
+would have configured.
+
+`request` and `preset` are mutually exclusive, because they describe one
+configuration at two widths rather than two configurations to combine:
+
+```json
+{"protocolVersion":1,"error":{"origin":"protocol","statusCode":3,"statusName":"INVALID_ARGUMENT","message":"request and preset are mutually exclusive","inputLine":1,"operation":"languageOptions"}}
+```
 
 `analyzerOptions.request` is a
 `googlesql.local_service.AnalyzerOptionsRequest`, which carries no fields. The

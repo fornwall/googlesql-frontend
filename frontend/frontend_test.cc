@@ -1,6 +1,8 @@
 #include "frontend/frontend.h"
 
+#include <algorithm>
 #include <string>
+#include <vector>
 
 #include "frontend/protocol.pb.h"
 #include "google/protobuf/util/json_util.h"
@@ -8,6 +10,25 @@
 
 namespace googlesql_frontend {
 namespace {
+
+// LanguageOptions holds its features and keywords in unordered containers, so
+// a serialized LanguageOptionsProto carries them in an unspecified order.
+// Compare them as sets.
+std::vector<int> SortedFeatures(
+    const googlesql::LanguageOptionsProto& options) {
+  std::vector<int> features(options.enabled_language_features().begin(),
+                            options.enabled_language_features().end());
+  std::sort(features.begin(), features.end());
+  return features;
+}
+
+std::vector<std::string> SortedReservedKeywords(
+    const googlesql::LanguageOptionsProto& options) {
+  std::vector<std::string> keywords(options.reserved_keywords().begin(),
+                                    options.reserved_keywords().end());
+  std::sort(keywords.begin(), keywords.end());
+  return keywords;
+}
 
 FrontendResponse ParseResponse(const std::string& json) {
   FrontendResponse response;
@@ -407,6 +428,152 @@ TEST(FrontendTest, NamedCatalogBaselineSurvivesWithoutAPreset) {
             std::string::npos);
 }
 
+TEST(FrontendTest, DefaultRewriteSetIsOptIn) {
+  Frontend frontend;
+  // AnalyzerOptionsProto.enabled_rewrites is repeated and therefore has no
+  // presence bit, so an absent list keeps meaning "no rewrite" as it always
+  // has. The PIVOT clause survives into the resolved tree.
+  ProcessResult absent = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT * FROM KeyValue PIVOT (MAX(Value) FOR Key IN (1))"}}})json",
+      1);
+  ASSERT_TRUE(absent.ok) << absent.output;
+  FrontendResponse absent_response = ParseResponse(absent.output);
+  const std::string& absent_debug = absent_response.analyze().debug_string();
+  EXPECT_NE(absent_debug.find("PivotScan"), std::string::npos) << absent_debug;
+  EXPECT_NE(absent_debug.find("pivot_column_list="), std::string::npos)
+      << absent_debug;
+
+  // REWRITES_DEFAULT asks for AnalyzerOptions::DefaultRewrites() instead,
+  // which contains REWRITE_PIVOT: the scan becomes an aggregation over a
+  // projection that compares the pivot value.
+  ProcessResult defaults = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","rewrites":"REWRITES_DEFAULT","request":{"sqlStatement":"SELECT * FROM KeyValue PIVOT (MAX(Value) FOR Key IN (1))"}}})json",
+      2);
+  ASSERT_TRUE(defaults.ok) << defaults.output;
+  FrontendResponse defaults_response = ParseResponse(defaults.output);
+  const std::string& defaults_debug =
+      defaults_response.analyze().debug_string();
+  EXPECT_EQ(defaults_debug.find("PivotScan"), std::string::npos)
+      << defaults_debug;
+  EXPECT_NE(defaults_debug.find("AggregateScan"), std::string::npos)
+      << defaults_debug;
+  EXPECT_NE(defaults_debug.find("$pivot.$pivot_value#5"), std::string::npos)
+      << defaults_debug;
+  EXPECT_NE(defaults_debug.find("$is_not_distinct_from"), std::string::npos)
+      << defaults_debug;
+
+  // REWRITES_AS_REQUESTED is the default value, so naming it explicitly beside
+  // an explicit list is byte-for-byte what the same request meant before the
+  // field existed.
+  ProcessResult explicit_list = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT * FROM KeyValue PIVOT (MAX(Value) FOR Key IN (1))","options":{"enabledRewrites":["REWRITE_PIVOT"]}}}})json",
+      3);
+  ASSERT_TRUE(explicit_list.ok) << explicit_list.output;
+  ProcessResult as_requested = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","rewrites":"REWRITES_AS_REQUESTED","request":{"sqlStatement":"SELECT * FROM KeyValue PIVOT (MAX(Value) FOR Key IN (1))","options":{"enabledRewrites":["REWRITE_PIVOT"]}}}})json",
+      4);
+  ASSERT_TRUE(as_requested.ok) << as_requested.output;
+  EXPECT_EQ(as_requested.output, explicit_list.output);
+  EXPECT_EQ(ParseResponse(as_requested.output).analyze().debug_string(),
+            defaults_debug);
+}
+
+TEST(FrontendTest, DefaultRewriteSetAddsTheRequestsOwnRewrites) {
+  Frontend frontend;
+  // One statement that reaches two rewriters: the PIVOT clause belongs to
+  // REWRITE_PIVOT, which GoogleSQL enables by default, and the ordered
+  // ARRAY_AGG to REWRITE_ORDER_BY_AND_LIMIT_IN_AGGREGATE, which it does not.
+  // Each leaves an unmistakable mark, so one tree tells the combinations apart.
+  const std::string statement =
+      "SELECT ARRAY_AGG(_1 ORDER BY _1) AS a FROM (SELECT * FROM KeyValue "
+      "PIVOT (MAX(Value) FOR Key IN (1)))";
+  const std::string extra =
+      R"json("options":{"enabledRewrites":["REWRITE_ORDER_BY_AND_LIMIT_IN_AGGREGATE"]})json";
+
+  // The named rewrite alone: the ordered aggregate is rewritten, and the
+  // default REWRITE_PIVOT is not applied.
+  ProcessResult requested = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":")json" +
+          statement + R"json(",)json" + extra + "}}}",
+      1);
+  ASSERT_TRUE(requested.ok) << requested.output;
+  FrontendResponse requested_response = ParseResponse(requested.output);
+  const std::string& requested_debug =
+      requested_response.analyze().debug_string();
+  EXPECT_NE(requested_debug.find("PivotScan"), std::string::npos)
+      << requested_debug;
+  EXPECT_NE(requested_debug.find("$agg_rewriter"), std::string::npos)
+      << requested_debug;
+
+  // The default set alone: the reverse.
+  ProcessResult defaults = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","rewrites":"REWRITES_DEFAULT","request":{"sqlStatement":")json" +
+          statement + "\"}}}",
+      2);
+  ASSERT_TRUE(defaults.ok) << defaults.output;
+  FrontendResponse defaults_response = ParseResponse(defaults.output);
+  const std::string& defaults_debug =
+      defaults_response.analyze().debug_string();
+  EXPECT_EQ(defaults_debug.find("PivotScan"), std::string::npos)
+      << defaults_debug;
+  EXPECT_EQ(defaults_debug.find("$agg_rewriter"), std::string::npos)
+      << defaults_debug;
+
+  // Both together: the explicit entry is added to the baseline rather than
+  // replacing it, so each rewriter leaves its mark on the same tree.
+  ProcessResult both = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","rewrites":"REWRITES_DEFAULT","request":{"sqlStatement":")json" +
+          statement + R"json(",)json" + extra + "}}}",
+      3);
+  ASSERT_TRUE(both.ok) << both.output;
+  FrontendResponse both_response = ParseResponse(both.output);
+  const std::string& both_debug = both_response.analyze().debug_string();
+  EXPECT_EQ(both_debug.find("PivotScan"), std::string::npos) << both_debug;
+  EXPECT_NE(both_debug.find("$pivot.$pivot_value"), std::string::npos)
+      << both_debug;
+  EXPECT_NE(both_debug.find("$agg_rewriter"), std::string::npos) << both_debug;
+
+  // Naming a rewrite the baseline already contains is not an error and does
+  // not change the result: enabled_rewrites is a set.
+  ProcessResult redundant = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","rewrites":"REWRITES_DEFAULT","request":{"sqlStatement":")json" +
+          statement +
+          R"json(","options":{"enabledRewrites":["REWRITE_PIVOT"]}}}})json",
+      4);
+  ASSERT_TRUE(redundant.ok) << redundant.output;
+  EXPECT_EQ(ParseResponse(redundant.output).analyze().debug_string(),
+            defaults_debug);
+}
+
+TEST(FrontendTest, RewriteSetReachesTheInlineCatalogPath) {
+  Frontend frontend;
+  const std::string statement =
+      R"json("request":{"sqlStatement":"SELECT * FROM numbers PIVOT (MAX(v) FOR k IN (1))","options":{"languageOptions":{"enabledLanguageFeatures":["FEATURE_PIVOT"]}},"simpleCatalog":{"name":"example","builtinFunctionOptions":{},"table":[{"name":"numbers","column":[{"name":"k","type":{"typeKind":"TYPE_INT64"}},{"name":"v","type":{"typeKind":"TYPE_INT64"}}]}]}}}})json";
+
+  ProcessResult absent = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{)json" + statement, 1);
+  ASSERT_TRUE(absent.ok) << absent.output;
+  FrontendResponse absent_response = ParseResponse(absent.output);
+  EXPECT_NE(absent_response.analyze().debug_string().find("PivotScan"),
+            std::string::npos)
+      << absent.output;
+
+  ProcessResult defaults = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"rewrites":"REWRITES_DEFAULT",)json" +
+          statement,
+      2);
+  ASSERT_TRUE(defaults.ok) << defaults.output;
+  FrontendResponse defaults_response = ParseResponse(defaults.output);
+  const std::string& defaults_debug =
+      defaults_response.analyze().debug_string();
+  EXPECT_EQ(defaults_debug.find("PivotScan"), std::string::npos)
+      << defaults_debug;
+  EXPECT_NE(defaults_debug.find("AggregateScan"), std::string::npos)
+      << defaults_debug;
+  EXPECT_NE(defaults_debug.find("$pivot.$pivot_value#5"), std::string::npos)
+      << defaults_debug;
+}
+
 TEST(FrontendTest, ReportsLanguageOptionsOfThisBuild) {
   Frontend frontend;
   ProcessResult defaults = frontend.ProcessLine(
@@ -458,6 +625,226 @@ TEST(FrontendTest, ReportsLanguageOptionsOfThisBuild) {
   EXPECT_GT(version_options.enabled_language_features_size(), 0);
   EXPECT_LT(version_options.enabled_language_features_size(),
             maximum_options.enabled_language_features_size());
+}
+
+TEST(FrontendTest, ReportsPresetExpansionOfThisBuild) {
+  Frontend frontend;
+  auto expansion = [&frontend](const std::string& preset, int line) {
+    ProcessResult result = frontend.ProcessLine(
+        R"({"protocolVersion":1,"languageOptions":{"preset":)" + preset + "}}",
+        line);
+    EXPECT_TRUE(result.ok) << result.output;
+    return ParseResponse(result.output).language_options().response();
+  };
+
+  // An empty preset is LanguageOptions' own defaults: no optional feature, no
+  // reserved keyword, and query statements only.
+  const googlesql::LanguageOptionsProto defaults = expansion("{}", 1);
+  EXPECT_EQ(defaults.enabled_language_features_size(), 0);
+  EXPECT_EQ(defaults.reserved_keywords_size(), 0);
+  EXPECT_EQ(defaults.supported_statement_kinds_size(), 1);
+
+  // features, whose three named sets nest: default, maximum, development.
+  const googlesql::LanguageOptionsProto maximum =
+      expansion(R"({"features":"LANGUAGE_FEATURES_MAXIMUM"})", 2);
+  EXPECT_GT(maximum.enabled_language_features_size(), 100);
+  const googlesql::LanguageOptionsProto development =
+      expansion(R"({"features":"LANGUAGE_FEATURES_DEVELOPMENT"})", 3);
+  EXPECT_GT(development.enabled_language_features_size(),
+            maximum.enabled_language_features_size());
+
+  // languageVersion, which selects a smaller set than the maximum one.
+  const googlesql::LanguageOptionsProto version =
+      expansion(R"({"languageVersion":"VERSION_1_3"})", 4);
+  EXPECT_GT(version.enabled_language_features_size(), 0);
+  EXPECT_LT(version.enabled_language_features_size(),
+            maximum.enabled_language_features_size());
+
+  // allReservableKeywordsReserved, the first member upstream's own
+  // LanguageOptionsRequest cannot express.
+  const googlesql::LanguageOptionsProto reserved =
+      expansion(R"({"allReservableKeywordsReserved":true})", 5);
+  EXPECT_GT(reserved.reserved_keywords_size(), 1);
+  const std::vector<std::string> keywords = SortedReservedKeywords(reserved);
+  EXPECT_NE(std::find(keywords.begin(), keywords.end(), "QUALIFY"),
+            keywords.end());
+  // The knobs are independent: reserving keywords enables no feature.
+  EXPECT_EQ(reserved.enabled_language_features_size(), 0);
+
+  // allStatementKindsSupported, the second one. GoogleSQL spells "all kinds"
+  // as the empty list, so the expansion is how a client learns that.
+  const googlesql::LanguageOptionsProto all_kinds =
+      expansion(R"({"allStatementKindsSupported":true})", 6);
+  EXPECT_EQ(all_kinds.supported_statement_kinds_size(), 0);
+
+  // preset is a superset of upstream's request: the two members they share
+  // expand identically, so a client can move to preset without a change in
+  // meaning.
+  ProcessResult maximum_request = frontend.ProcessLine(
+      R"({"protocolVersion":1,"languageOptions":{"request":{"maximumFeatures":true}}})",
+      7);
+  ASSERT_TRUE(maximum_request.ok) << maximum_request.output;
+  const googlesql::LanguageOptionsProto maximum_upstream =
+      ParseResponse(maximum_request.output).language_options().response();
+  EXPECT_EQ(SortedFeatures(maximum), SortedFeatures(maximum_upstream));
+  EXPECT_EQ(SortedReservedKeywords(maximum),
+            SortedReservedKeywords(maximum_upstream));
+
+  ProcessResult version_request = frontend.ProcessLine(
+      R"({"protocolVersion":1,"languageOptions":{"request":{"languageVersion":"VERSION_1_3"}}})",
+      8);
+  ASSERT_TRUE(version_request.ok) << version_request.output;
+  EXPECT_EQ(
+      SortedFeatures(version),
+      SortedFeatures(
+          ParseResponse(version_request.output).language_options().response()));
+}
+
+TEST(FrontendTest, ReportedPresetExpansionIsTheOneParseAndAnalyzeApply) {
+  // The guard against introspection drifting away from behaviour. For a preset
+  // P, running a statement under `languageOptionsPreset: P` and running it
+  // under the expansion `languageOptions` reports for P must be the same run,
+  // down to the reply bytes. A reported set that were wider or narrower than
+  // the applied one would change some probe's outcome, and the two replies
+  // would stop matching.
+  //
+  // Every request below is processed as input line 1, because a rejection
+  // echoes its line number and only the SQL outcome is under test here.
+  Frontend frontend;
+  auto reported_expansion = [&frontend](const std::string& preset) {
+    ProcessResult result = frontend.ProcessLine(
+        R"({"protocolVersion":1,"languageOptions":{"preset":)" + preset + "}}",
+        1);
+    EXPECT_TRUE(result.ok) << result.output;
+    return ParseResponse(result.output).language_options().response();
+  };
+
+  // Statements whose outcome turns on the reserved-keyword set: a reserved
+  // keyword cannot be an alias. QUALIFY additionally reaches the analytic
+  // grammar, where reservation decides between a clause and a syntax error.
+  const std::vector<std::string> statements = {
+      "SELECT 1 AS QUALIFY",
+      "SELECT 1 AS ALIGN",
+      "SELECT 1 AS GRAPH_TABLE",
+      "SELECT 1 AS MATCH_RECOGNIZE",
+      "SELECT Key+1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY "
+      "Key) = 1",
+  };
+  const std::vector<std::string> presets = {
+      "{}",
+      R"({"features":"LANGUAGE_FEATURES_MAXIMUM"})",
+      R"({"allReservableKeywordsReserved":true})",
+      R"({"features":"LANGUAGE_FEATURES_MAXIMUM","allReservableKeywordsReserved":true})",
+  };
+
+  int accepted = 0;
+  int rejected = 0;
+  for (const std::string& preset : presets) {
+    const googlesql::LanguageOptionsProto expansion =
+        reported_expansion(preset);
+    for (const std::string& statement : statements) {
+      ProcessResult by_preset = frontend.ProcessLine(
+          R"({"protocolVersion":1,"parse":{"languageOptionsPreset":)" + preset +
+              R"(,"request":{"sqlStatement":")" + statement + "\"}}}",
+          1);
+
+      FrontendRequest by_report;
+      by_report.set_protocol_version(1);
+      googlesql::local_service::ParseRequest* parse =
+          by_report.mutable_parse()->mutable_request();
+      parse->set_sql_statement(statement);
+      *parse->mutable_options() = expansion;
+      ProcessResult from_report =
+          frontend.ProcessLine(RequestJson(by_report), 1);
+
+      EXPECT_EQ(by_preset.output, from_report.output)
+          << preset << " / " << statement;
+      by_preset.ok ? ++accepted : ++rejected;
+    }
+  }
+  // The matrix is not vacuously equal: it contains both outcomes, so an
+  // expansion that lost or gained a keyword would move at least one cell.
+  EXPECT_GT(accepted, 0);
+  EXPECT_GT(rejected, 0);
+
+  // Statement kinds and most features are invisible to the parser, so the same
+  // round trip runs through analyze as well, where the reported expansion
+  // travels as request.options.languageOptions.
+  const std::string create_table = "CREATE TABLE t (x INT64)";
+  const std::string typeof_call = "SELECT TYPEOF(1)";
+  const std::vector<std::string> analyze_presets = {
+      "{}",
+      R"({"languageVersion":"VERSION_1_3"})",
+      R"({"features":"LANGUAGE_FEATURES_MAXIMUM"})",
+      R"({"features":"LANGUAGE_FEATURES_MAXIMUM","allStatementKindsSupported":true})",
+  };
+  for (const std::string& preset : analyze_presets) {
+    const googlesql::LanguageOptionsProto expansion =
+        reported_expansion(preset);
+    for (const std::string& statement : {create_table, typeof_call}) {
+      ProcessResult by_preset = frontend.ProcessLine(
+          R"({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","languageOptionsPreset":)" +
+              preset + R"(,"request":{"sqlStatement":")" + statement + "\"}}}",
+          1);
+
+      FrontendRequest by_report;
+      by_report.set_protocol_version(1);
+      by_report.mutable_analyze()->set_named_catalog(CATALOG_NONE);
+      googlesql::local_service::AnalyzeRequest* analyze =
+          by_report.mutable_analyze()->mutable_request();
+      analyze->set_sql_statement(statement);
+      *analyze->mutable_options()->mutable_language_options() = expansion;
+      ProcessResult from_report =
+          frontend.ProcessLine(RequestJson(by_report), 1);
+
+      EXPECT_EQ(by_preset.output, from_report.output)
+          << preset << " / " << statement;
+
+      // Each probe is decided by one knob, which is what keeps the comparison
+      // above from passing vacuously: CREATE TABLE needs the statement-kind
+      // knob, and TYPEOF needs a feature set that version 1.3 already carries.
+      const bool expected_ok =
+          statement == create_table
+              ? preset.find("allStatementKindsSupported") != std::string::npos
+              : preset != "{}";
+      EXPECT_EQ(by_preset.ok, expected_ok)
+          << preset << " / " << statement << ": " << by_preset.output;
+    }
+  }
+}
+
+TEST(FrontendTest, RejectsLanguageOptionsRequestBesidePreset) {
+  Frontend frontend;
+  ProcessResult conflict = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"lc","languageOptions":{"request":{"maximumFeatures":true},"preset":{"features":"LANGUAGE_FEATURES_MAXIMUM"}}})",
+      1);
+  ASSERT_FALSE(conflict.ok);
+  FrontendResponse conflict_response = ParseResponse(conflict.output);
+  EXPECT_EQ(conflict_response.id(), "lc");
+  EXPECT_EQ(conflict_response.error().origin(), "protocol");
+  EXPECT_EQ(conflict_response.error().operation(), "languageOptions");
+  EXPECT_EQ(conflict_response.error().message(),
+            "request and preset are mutually exclusive");
+  EXPECT_FALSE(conflict_response.error().has_location());
+
+  // Presence is what conflicts, not content: an empty request object beside a
+  // preset still states one configuration twice.
+  ProcessResult empty_request = frontend.ProcessLine(
+      R"({"protocolVersion":1,"languageOptions":{"request":{},"preset":{}}})",
+      2);
+  ASSERT_FALSE(empty_request.ok);
+  EXPECT_EQ(ParseResponse(empty_request.output).error().message(),
+            "request and preset are mutually exclusive");
+
+  // Neither member remains valid, and still reports GoogleSQL's defaults.
+  ProcessResult neither =
+      frontend.ProcessLine(R"({"protocolVersion":1,"languageOptions":{}})", 3);
+  ASSERT_TRUE(neither.ok) << neither.output;
+  EXPECT_EQ(ParseResponse(neither.output)
+                .language_options()
+                .response()
+                .enabled_language_features_size(),
+            0);
 }
 
 TEST(FrontendTest, ReportsAnalyzerOptionDefaultsOfThisBuild) {

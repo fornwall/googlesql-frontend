@@ -135,6 +135,27 @@ rejected_requests = [
     {"protocolVersion": 2, "parse": {"request": {"sqlStatement": "SELECT 1"}}},
     {"protocolVersion": 1, "languageOptions": {"request": {"unknown": True}}},
     {"protocolVersion": 1, "analyzerOptions": {"request": {"maximumFeatures": True}}},
+    # preset expresses everything request does, so naming both states one
+    # configuration twice.
+    {
+        "protocolVersion": 1,
+        "languageOptions": {
+            "request": {"maximumFeatures": True},
+            "preset": {"features": "LANGUAGE_FEATURES_MAXIMUM"},
+        },
+    },
+    {"protocolVersion": 1, "languageOptions": {"request": {}, "preset": {}}},
+    {
+        "protocolVersion": 1,
+        "languageOptions": {"preset": {"features": "MAXIMUM"}},
+    },
+    {
+        "protocolVersion": 1,
+        "languageOptions": {"preset": {"allReservableKeywords": True}},
+    },
+    # Only the language options are presettable; the analyzer defaults have no
+    # knobs to name.
+    {"protocolVersion": 1, "analyzerOptions": {"preset": {}}},
     {"protocolVersion": 1, "languageOptions": {}, "analyzerOptions": {}},
     {
         "protocolVersion": 1,
@@ -148,6 +169,29 @@ rejected_requests = [
         "parse": {
             "request": {"sqlStatement": "SELECT 1"},
             "languageOptionsPreset": {"allReservableKeywords": True},
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "analyze": {
+            "request": {"sqlStatement": "SELECT 1"},
+            "rewrites": "DEFAULT",
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "analyze": {
+            "request": {"sqlStatement": "SELECT 1"},
+            "rewrites": ["REWRITES_DEFAULT"],
+        },
+    },
+    # The rewrite baseline belongs to analyze, which is the only operation that
+    # runs the resolver.
+    {
+        "protocolVersion": 1,
+        "parse": {
+            "request": {"sqlStatement": "SELECT 1"},
+            "rewrites": "REWRITES_DEFAULT",
         },
     },
     {

@@ -1,0 +1,16 @@
+{
+  "protocolVersion": 1,
+  "id": "analyze-rewrites-1",
+  "analyze": {
+    "namedCatalog": "CATALOG_SAMPLE",
+    "rewrites": "REWRITES_DEFAULT",
+    "request": {
+      "sqlStatement": "SELECT * FROM KeyValue PIVOT (MAX(Value) FOR Key IN (1))",
+      "options": {
+        "enabledRewrites": [
+          "REWRITE_ORDER_BY_AND_LIMIT_IN_AGGREGATE"
+        ]
+      }
+    }
+  }
+}

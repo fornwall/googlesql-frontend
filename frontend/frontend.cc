@@ -396,9 +396,11 @@ absl::StatusOr<DescriptorPools> BuildDescriptorPools(
 // read those defaults from a default-constructed AnalyzerOptions so they track
 // GoogleSQL rather than a private copy of its literals.
 //
-// Repeated fields are left exactly as upstream deserializes them: proto
-// absence and an explicit empty list are indistinguishable, so enabled_rewrites
-// keeps its deserialized meaning.
+// Repeated fields are left exactly as upstream deserializes them, because
+// proto absence and an explicit empty list are indistinguishable there. The
+// one repeated field whose C++ default is not empty, enabled_rewrites, is
+// therefore restored one level up by AnalyzeOperation.rewrites, where the
+// request still says which of the two it meant. See ApplyRewriteSet.
 absl::Status DeserializeAnalyzerOptions(
     const googlesql::AnalyzerOptionsProto& proto,
     const std::vector<const google::protobuf::DescriptorPool*>& pools,
@@ -443,14 +445,16 @@ absl::Status DeserializeAnalyzerOptions(
   return absl::OkStatus();
 }
 
-// Expands a preset into a LanguageOptionsProto and merges the request's own
-// language options on top of it. LanguageOptions::Serialize writes every field,
-// so the expansion is complete before the merge: scalars the request sets
-// replace the preset's, and repeated entries the request lists are added to the
-// preset's. The result is "preset plus explicit additions" rather than either
-// one alone.
-void ApplyLanguageOptionsPreset(const LanguageOptionsPreset& preset,
-                                googlesql::LanguageOptionsProto* options) {
+// Expands a preset into the complete LanguageOptionsProto it names.
+// LanguageOptions::Serialize writes every field, so the result stands on its
+// own: it is what the preset means, with nothing left implicit.
+//
+// This is the only expansion in the frontend. Applying a preset to analyze or
+// parse and reporting one through the languageOptions operation both go
+// through here, so what a client reads back cannot drift from what the
+// analyzer and the parser were configured with.
+googlesql::LanguageOptionsProto ExpandLanguageOptionsPreset(
+    const LanguageOptionsPreset& preset) {
   googlesql::LanguageOptions expanded;
   // SetLanguageVersion replaces the enabled feature set rather than adding to
   // it, so it runs first: when a feature set is named as well, that set is the
@@ -475,19 +479,60 @@ void ApplyLanguageOptionsPreset(const LanguageOptionsPreset& preset,
     expanded.SetSupportsAllStatementKinds();
   }
 
-  googlesql::LanguageOptionsProto merged;
-  expanded.Serialize(&merged);
+  googlesql::LanguageOptionsProto serialized;
+  expanded.Serialize(&serialized);
+  return serialized;
+}
+
+// Merges the request's own language options on top of the preset's expansion:
+// scalars the request sets replace the preset's, and repeated entries the
+// request lists are added to the preset's. The result is "preset plus explicit
+// additions" rather than either one alone.
+void ApplyLanguageOptionsPreset(const LanguageOptionsPreset& preset,
+                                googlesql::LanguageOptionsProto* options) {
+  googlesql::LanguageOptionsProto merged = ExpandLanguageOptionsPreset(preset);
   merged.MergeFrom(*options);
   options->Swap(&merged);
+}
+
+// Expands a rewrite baseline into the request's own enabled_rewrites list, in
+// the same "preset plus explicit additions" shape as the language-options
+// preset above.
+//
+// AnalyzerOptions::Deserialize clears enabled_rewrites and refills it from the
+// proto, so it always starts from no rewrite at all. That is not the default a
+// default-constructed AnalyzerOptions carries, but the field is repeated and
+// therefore has no presence bit, so the deserializer genuinely cannot tell an
+// omitted list from a request for none. REWRITES_DEFAULT names the baseline
+// instead, and expands it here where the request's intent is still known.
+void ApplyRewriteSet(RewriteSet rewrites,
+                     googlesql::local_service::AnalyzeRequest* request) {
+  if (rewrites == REWRITES_AS_REQUESTED) {
+    // Nothing to add, and no analyzer options to materialize in order to add
+    // it: an absent field leaves the request byte-for-byte as it arrived.
+    return;
+  }
+  googlesql::AnalyzerOptionsProto* options = request->mutable_options();
+  absl::flat_hash_set<int> enabled(options->enabled_rewrites().begin(),
+                                   options->enabled_rewrites().end());
+  for (const googlesql::ResolvedASTRewrite rewrite :
+       googlesql::AnalyzerOptions::DefaultRewrites()) {
+    if (enabled.insert(rewrite).second) {
+      options->add_enabled_rewrites(rewrite);
+    }
+  }
 }
 
 // Builds the AnalyzeRequest the frontend actually runs. An explicit preset
 // always applies. Otherwise a named catalog with no language options at all
 // keeps its documented baseline of maximum released features, all statement
-// kinds, and all reservable keywords.
+// kinds, and all reservable keywords. The rewrite baseline is independent of
+// both, and reaches the named-catalog and inline-catalog paths alike because
+// they share this request.
 googlesql::local_service::AnalyzeRequest EffectiveAnalyzeRequest(
     const AnalyzeOperation& operation) {
   googlesql::local_service::AnalyzeRequest request = operation.request();
+  ApplyRewriteSet(operation.rewrites(), &request);
   if (operation.has_language_options_preset()) {
     ApplyLanguageOptionsPreset(
         operation.language_options_preset(),
@@ -1008,8 +1053,18 @@ absl::Status ValidateRequest(const FrontendRequest& request) {
       }
       return absl::OkStatus();
     }
+    case FrontendRequest::kLanguageOptions: {
+      // preset expresses everything request does, so a line carrying both
+      // states one configuration twice and there is no defensible rule for
+      // combining them.
+      const LanguageOptionsOperation& operation = request.language_options();
+      if (operation.has_request() && operation.has_preset()) {
+        return absl::InvalidArgumentError(
+            "request and preset are mutually exclusive");
+      }
+      return ValidateResponseOptions(request);
+    }
     case FrontendRequest::kBuiltinFunctions:
-    case FrontendRequest::kLanguageOptions:
     case FrontendRequest::kAnalyzerOptions:
       return ValidateResponseOptions(request);
     case FrontendRequest::OPERATION_NOT_SET:
@@ -1308,9 +1363,18 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
       break;
     }
     case FrontendRequest::kLanguageOptions: {
+      const LanguageOptionsOperation& operation = request.language_options();
       googlesql::LanguageOptionsProto local_response;
-      status = service_.GetLanguageOptions(request.language_options().request(),
-                                           &local_response);
+      if (operation.has_preset()) {
+        // Deliberately the same expansion analyze and parse apply, so this
+        // operation reports the tool's behaviour rather than a description of
+        // it. Nothing is merged on top, because the preset is the whole
+        // request here.
+        local_response = ExpandLanguageOptionsPreset(operation.preset());
+      } else {
+        status =
+            service_.GetLanguageOptions(operation.request(), &local_response);
+      }
       if (status.ok()) {
         response.mutable_language_options()->mutable_response()->Swap(
             &local_response);

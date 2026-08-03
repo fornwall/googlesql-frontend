@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "id": "analyze-rewrites-1",
+  "analyze": {
+    "response": {
+      "resolvedStatement": {
+        "resolvedQueryStmtNode": {}
+      }
+    },
+    "debugString": "QueryStmt\n+-output_column_list=\n| +-$pivot._1#4 AS _1 [STRING]\n+-query=\n  +-ProjectScan\n    +-column_list=[$pivot._1#4]\n    +-input_scan=\n      +-AggregateScan..."
+  }
+}

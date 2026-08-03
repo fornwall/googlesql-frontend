@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "id": "language-options-preset-1",
+  "languageOptions": {
+    "preset": {
+      "allReservableKeywordsReserved": true,
+      "allStatementKindsSupported": true
+    }
+  }
+}

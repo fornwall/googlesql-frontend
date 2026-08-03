@@ -35,10 +35,28 @@ message LanguageOptionsPreset {
   optional bool all_statement_kinds_supported = 4 [default = false];
 }
 
+// A named starting point for the analyzer's resolved-AST rewrites, applied
+// before the request's own enabled_rewrites entries are added to it.
+//
+// AnalyzerOptionsProto.enabled_rewrites is a repeated field, so it carries no
+// presence bit: GoogleSQL's deserializer cannot tell an omitted list from an
+// explicitly empty one, and begins from no rewrite at all in both cases. The
+// baseline is named here so that both meanings stay expressible.
+enum RewriteSet {
+  // Exactly the rewrites request.options.enabled_rewrites names, which is what
+  // GoogleSQL's deserializer alone produces. An omitted or empty list applies
+  // no rewrite.
+  REWRITES_AS_REQUESTED = 0;
+  // AnalyzerOptions::DefaultRewrites(), the set a default-constructed
+  // AnalyzerOptions enables, plus the rewrites the request names itself.
+  REWRITES_DEFAULT = 1;
+}
+
 message AnalyzeOperation {
   required googlesql.local_service.AnalyzeRequest request = 1;
   optional NamedCatalog named_catalog = 2;
   optional LanguageOptionsPreset language_options_preset = 3;
+  optional RewriteSet rewrites = 4 [default = REWRITES_AS_REQUESTED];
 }
 
 enum ExtendedParseRoot {
@@ -73,8 +91,18 @@ message BuiltinFunctionsOperation {
 
 // Reads the language options this build of GoogleSQL produces, so a client can
 // record the tool's own vintage instead of deriving it from a source checkout.
+//
+// At most one of the two members is allowed; an operation that carries neither
+// reports GoogleSQL's own defaults.
 message LanguageOptionsOperation {
   optional googlesql.local_service.LanguageOptionsRequest request = 1;
+  // The preset analyze and parse accept, expanded and reported rather than
+  // applied. It expresses everything request does and adds reservable keywords
+  // and statement kinds, so a configuration reachable through a preset is also
+  // readable, and the expansion comes from the code path analyze and parse
+  // run. Mutually exclusive with request rather than merged with it, because
+  // the two describe the same thing at different widths.
+  optional LanguageOptionsPreset preset = 2;
 }
 
 // Reads the analyzer-option defaults of this build of GoogleSQL. These are the
