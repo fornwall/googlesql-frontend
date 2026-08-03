@@ -1,0 +1,197 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GOOGLESQL_COMMIT: 1f8aa333f4d6353cd3a64471fc83121df72df3f7
+  LLVM_MAJOR: "21"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - triple: x86_64-linux-gnu
+            os: ubuntu-24.04
+            kind: linux
+          - triple: aarch64-apple-darwin
+            os: macos-15
+            kind: macos
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    steps:
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/local/share/boost /usr/local/share/powershell \
+            /usr/share/swift "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - uses: actions/checkout@v7
+
+      - name: Verify source pins
+        run: |
+          python3 scripts/check-version.py
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            python3 scripts/check-version.py --tag "$GITHUB_REF_NAME"
+          fi
+          test "$(cat .bazelversion)" = "9.2.0"
+          if command -v sha256sum >/dev/null; then
+            patch_sha="$(sha256sum patches/googlesql/pull-5.patch | cut -d' ' -f1)"
+          else
+            patch_sha="$(shasum -a 256 patches/googlesql/pull-5.patch | cut -d' ' -f1)"
+          fi
+          test "$patch_sha" = \
+            5e3a6c8140fe25e247126d1b76dc3d9d7376926cd2ee35167ee52c9e452e6911
+
+      - name: Install toolchain (Linux)
+        if: matrix.kind == 'linux'
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh "$LLVM_MAJOR"
+          "clang-$LLVM_MAJOR" --version
+
+      - name: Build and test (Linux)
+        if: matrix.kind == 'linux'
+        run: |
+          bazel --version
+          bazel build -c opt \
+            --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
+            --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
+            //frontend:googlesql-frontend
+          bazel test -c opt \
+            --repo_env=CC="/usr/bin/clang-$LLVM_MAJOR" \
+            --repo_env=CXX="/usr/bin/clang++-$LLVM_MAJOR" \
+            --test_output=errors \
+            //...
+          mkdir dist
+          cp bazel-bin/frontend/googlesql-frontend dist/
+          cp LICENSE dist/
+          {
+            echo "triple: ${{ matrix.triple }}"
+            echo "bazel: $(bazel --version)"
+            echo "cc: $("clang-$LLVM_MAJOR" --version | head -1)"
+            echo "libc: $(ldd --version | head -1)"
+            echo "os: $(lsb_release -ds) (GitHub ${{ matrix.os }} runner)"
+          } > dist/toolchain.txt
+
+      - name: Install toolchain (macOS)
+        if: matrix.kind == 'macos'
+        run: |
+          command -v bazel >/dev/null || brew install bazelisk
+          command -v zstd >/dev/null || brew install zstd
+          brew install "llvm@$LLVM_MAJOR"
+
+      - name: Build and test (macOS)
+        if: matrix.kind == 'macos'
+        run: |
+          LLVM_PREFIX="$(brew --prefix "llvm@$LLVM_MAJOR")"
+          SDKROOT="$(xcrun --show-sdk-path)"
+          export SDKROOT
+          "$LLVM_PREFIX/bin/clang" --version
+          bazel --version
+          bazel build -c opt \
+            --repo_env=CC="$LLVM_PREFIX/bin/clang" \
+            --repo_env=CXX="$LLVM_PREFIX/bin/clang++" \
+            --repo_env=SDKROOT="$SDKROOT" \
+            --action_env=SDKROOT="$SDKROOT" \
+            //frontend:googlesql-frontend
+          bazel test -c opt \
+            --repo_env=CC="$LLVM_PREFIX/bin/clang" \
+            --repo_env=CXX="$LLVM_PREFIX/bin/clang++" \
+            --repo_env=SDKROOT="$SDKROOT" \
+            --action_env=SDKROOT="$SDKROOT" \
+            --test_output=errors \
+            //...
+          mkdir dist
+          cp bazel-bin/frontend/googlesql-frontend dist/
+          cp LICENSE dist/
+          {
+            echo "triple: ${{ matrix.triple }}"
+            echo "bazel: $(bazel --version)"
+            echo "cc: $("$LLVM_PREFIX/bin/clang" --version | head -1)"
+            echo "os: $(sw_vers -productName) $(sw_vers -productVersion) (GitHub ${{ matrix.os }} runner)"
+            echo "sdk: $(xcrun --show-sdk-version)"
+          } > dist/toolchain.txt
+
+      - name: Verify executable
+        run: |
+          test -x dist/googlesql-frontend
+          python3 scripts/check-version.py --binary dist/googlesql-frontend
+          file dist/googlesql-frontend
+          if [ "$RUNNER_OS" = Linux ]; then
+            file dist/googlesql-frontend | grep -q 'x86-64'
+          else
+            lipo -info dist/googlesql-frontend | grep -qw arm64
+          fi
+
+      - name: Package
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="dev-$(echo "$GITHUB_SHA" | cut -c1-7)"
+          fi
+          name="googlesql-frontend-$version-${{ matrix.triple }}"
+          {
+            echo "package: $name"
+            echo "source: $GITHUB_REPOSITORY@$GITHUB_SHA"
+            echo "googlesql: google/googlesql@$GOOGLESQL_COMMIT (+ pull-5.patch)"
+            echo "build: bazel build -c opt //frontend:googlesql-frontend"
+            cat dist/toolchain.txt
+          } > dist/BUILDINFO.txt
+          rm dist/toolchain.txt
+          tar -cf - -C dist . | zstd -19 -T0 -o "$name.tar.zst"
+          ls -lh "$name.tar.zst"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: googlesql-frontend-${{ matrix.triple }}
+          path: "*.tar.zst"
+          compression-level: 0
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download platform packages
+        uses: actions/download-artifact@v8
+        with:
+          path: assets
+          pattern: googlesql-frontend-*
+          merge-multiple: true
+
+      - name: Create checksums
+        run: |
+          cd assets
+          sha256sum -- *.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Prebuilt googlesql-frontend binaries for Linux x86-64 and macOS arm64. Verify downloads with SHA256SUMS." \
+            assets/*.tar.zst assets/SHA256SUMS
+
+      - name: Upload rehearsal assets
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: googlesql-frontend-release-assets
+          path: assets/
+          compression-level: 0

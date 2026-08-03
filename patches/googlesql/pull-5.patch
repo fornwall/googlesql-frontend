@@ -1,0 +1,86 @@
+From 7a9aad8b0cddb877362edf580f6b55ceacea6b72 Mon Sep 17 00:00:00 2001
+From: Fredrik Fornwall <fredrik@fornwall.net>
+Date: Thu, 23 Jul 2026 04:04:09 +0200
+Subject: [PATCH] Fix GOOGLESQL_QCHECK_OK silently compiling out its argument
+ under NDEBUG
+
+GOOGLESQL_QCHECK_OK was defined as ABSL_DCHECK_EQ, whose arguments are
+not evaluated when NDEBUG is defined (absl expands DCHECKs to a
+`while (false && ...)` no-op in release builds). QCHECK semantics
+require the condition to be evaluated in all build modes.
+
+This made the analyzer's DATE->DATETIME constant fold in cast.cc return
+the default-constructed DatetimeValue (1970-01-01 00:00:00) for every
+input in optimized (-DNDEBUG) builds: the entire ConstructDatetime()
+call was the macro argument, so it was compiled out and the output
+variable was never written.
+
+Fix:
+- Define GOOGLESQL_QCHECK_OK with ABSL_QCHECK_EQ (always evaluated),
+  and include/depend on absl_check explicitly.
+- Switch the cast.cc DATE->DATETIME case to GOOGLESQL_RETURN_IF_ERROR,
+  matching every sibling conversion case, so the conversion is evaluated
+  unconditionally and failure surfaces as an eval error rather than a
+  process abort.
+
+The same macro also guards string-to-value conversions in
+compliance/functions_testlib_interval.cc (4 sites), which were likewise
+skipped under NDEBUG; the macro fix restores their evaluation.
+
+Signed-off-by: Fredrik Fornwall <fredrik@fornwall.net>
+---
+ googlesql/base/BUILD     | 1 +
+ googlesql/base/status.h  | 7 ++++---
+ googlesql/public/cast.cc | 2 +-
+ 3 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/googlesql/base/BUILD b/googlesql/base/BUILD
+index da713437f..0e3ba456f 100644
+--- a/googlesql/base/BUILD
++++ b/googlesql/base/BUILD
+@@ -196,6 +196,7 @@ cc_library(
+         "@com_google_absl//absl/base:core_headers",
+         "@com_google_absl//absl/base:log_severity",
+         "@com_google_absl//absl/log",
++        "@com_google_absl//absl/log:absl_check",
+         "@com_google_absl//absl/status",
+         "@com_google_absl//absl/status:statusor",
+         "@com_google_absl//absl/strings",
+diff --git a/googlesql/base/status.h b/googlesql/base/status.h
+index 16f8282c0..4b163c4af 100644
+--- a/googlesql/base/status.h
++++ b/googlesql/base/status.h
+@@ -17,8 +17,9 @@
+ #ifndef THIRD_PARTY_GOOGLESQL_GOOGLESQL_BASE_STATUS_H_
+ #define THIRD_PARTY_GOOGLESQL_GOOGLESQL_BASE_STATUS_H_
+ 
+-#include "absl/status/status.h"  
+-#include "absl/status/statusor.h"  
++#include "absl/log/absl_check.h"
++#include "absl/status/status.h"
++#include "absl/status/statusor.h"
+ 
+ // This is better than ABSL_CHECK((val).ok()) because the embedded
+ // error string gets printed by the ABSL_CHECK_EQ.
+@@ -27,7 +28,7 @@
+ #define GOOGLESQL_DCHECK_OK(val) \
+   ABSL_DCHECK_EQ(::absl::OkStatus(), ::googlesql::status_internal::AsStatus((val)))
+ #define GOOGLESQL_QCHECK_OK(val) \
+-  ABSL_DCHECK_EQ(::absl::OkStatus(), ::googlesql::status_internal::AsStatus((val)))
++  ABSL_QCHECK_EQ(::absl::OkStatus(), ::googlesql::status_internal::AsStatus((val)))
+ 
+ namespace googlesql::status_internal {
+ 
+diff --git a/googlesql/public/cast.cc b/googlesql/public/cast.cc
+index bbae5a60e..85eb52637 100644
+--- a/googlesql/public/cast.cc
++++ b/googlesql/public/cast.cc
+@@ -1350,7 +1350,7 @@ absl::StatusOr<Value> CastContext::CastValue(
+     }
+     case FCT(TYPE_DATE, TYPE_DATETIME): {
+       DatetimeValue datetime;
+-      GOOGLESQL_QCHECK_OK(
++      GOOGLESQL_RETURN_IF_ERROR(
+           functions::ConstructDatetime(v.date_value(), TimeValue(), &datetime));
+       return Value::Datetime(datetime);
+     }

@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "id": "builtins-1",
+  "builtinFunctions": {
+    "response": {
+      "function": [],
+      "types": {},
+      "tableValuedFunction": []
+    },
+    "debugString": ""
+  }
+}

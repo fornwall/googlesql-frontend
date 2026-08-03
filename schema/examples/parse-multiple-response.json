@@ -1,0 +1,17 @@
+{
+  "protocolVersion": 1,
+  "id": "parse-multiple-1",
+  "parse": {
+    "extendedResponse": {
+      "parsedStatement": [
+        {
+          "astQueryStatementNode": {}
+        },
+        {
+          "astQueryStatementNode": {}
+        }
+      ]
+    },
+    "debugString": "QueryStatement [0-8]\n\nQueryStatement [10-18]"
+  }
+}

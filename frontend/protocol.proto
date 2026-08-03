@@ -1,0 +1,101 @@
+syntax = "proto2";
+
+package googlesql_frontend;
+
+import "googlesql/local_service/local_service.proto";
+import "googlesql/parser/parse_tree.proto";
+import "googlesql/proto/options.proto";
+
+enum NamedCatalog {
+  CATALOG_NONE = 0;
+  CATALOG_SAMPLE = 1;
+}
+
+message AnalyzeOperation {
+  required googlesql.local_service.AnalyzeRequest request = 1;
+  optional NamedCatalog named_catalog = 2;
+}
+
+enum ExtendedParseRoot {
+  EXPRESSION = 1;
+  TYPE = 2;
+  PARSE_MULTIPLE = 3;
+}
+
+message ExtendedParseRequest {
+  required string sql = 1;
+  required ExtendedParseRoot root = 2;
+  optional googlesql.LanguageOptionsProto options = 3;
+}
+
+message RenderOptions {
+  optional bool output_asc_explicitly = 1 [default = false];
+}
+
+message ParseOperation {
+  oneof input {
+    googlesql.local_service.ParseRequest request = 1;
+    ExtendedParseRequest extended_request = 2;
+  }
+  optional RenderOptions render_options = 3;
+}
+
+message BuiltinFunctionsOperation {
+  required googlesql.GoogleSQLBuiltinFunctionOptionsProto request = 1;
+}
+
+message FrontendRequest {
+  required uint32 protocol_version = 1;
+  optional string id = 2;
+
+  oneof operation {
+    AnalyzeOperation analyze = 10;
+    ParseOperation parse = 11;
+    BuiltinFunctionsOperation builtin_functions = 12;
+  }
+}
+
+message AnalyzeResult {
+  required googlesql.local_service.AnalyzeResponse response = 1;
+  required string debug_string = 2;
+}
+
+message ExtendedParseResponse {
+  optional googlesql.AnyASTExpressionProto parsed_expression = 1;
+  optional googlesql.AnyASTTypeProto parsed_type = 2;
+  repeated googlesql.AnyASTStatementProto parsed_statement = 3;
+}
+
+message ParseResult {
+  oneof result {
+    googlesql.local_service.ParseResponse response = 1;
+    ExtendedParseResponse extended_response = 3;
+  }
+  required string debug_string = 2;
+}
+
+message BuiltinFunctionsResult {
+  required googlesql.local_service.GetBuiltinFunctionsResponse response = 1;
+  required string debug_string = 2;
+}
+
+message FrontendError {
+  required string origin = 1;
+  required int32 status_code = 2;
+  required string status_name = 3;
+  required string message = 4;
+  required int32 line = 5;
+  optional string operation = 6;
+}
+
+message FrontendResponse {
+  required uint32 protocol_version = 1;
+  optional string id = 2;
+
+  oneof result {
+    AnalyzeResult analyze = 10;
+    ParseResult parse = 11;
+    BuiltinFunctionsResult builtin_functions = 12;
+    FrontendError error = 13;
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "protocolVersion": 1,
+  "id": "parse-1",
+  "parse": {
+    "request": {
+      "sqlStatement": "SELECT 1"
+    }
+  }
+}

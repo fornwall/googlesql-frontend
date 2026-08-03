@@ -1,0 +1,11 @@
+{
+  "protocolVersion": 1,
+  "id": "builtins-1",
+  "builtinFunctions": {
+    "request": {
+      "languageOptions": {
+        "productMode": "PRODUCT_EXTERNAL"
+      }
+    }
+  }
+}

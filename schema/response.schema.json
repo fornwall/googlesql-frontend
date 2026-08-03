@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fornwall/googlesql-frontend/schema/response.schema.json",
+  "title": "googlesql-frontend NDJSON response",
+  "description": "One standard-output success or error response object, encoded on one NDJSON line.",
+  "type": "object",
+  "required": [
+    "protocolVersion"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "analyze": {
+      "$ref": "#/$defs/analyzeSuccess"
+    },
+    "parse": {
+      "$ref": "#/$defs/parseSuccess"
+    },
+    "builtinFunctions": {
+      "$ref": "#/$defs/builtinFunctionsSuccess"
+    },
+    "error": {
+      "$ref": "#/$defs/error"
+    }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "required": [
+        "analyze"
+      ]
+    },
+    {
+      "required": [
+        "parse"
+      ]
+    },
+    {
+      "required": [
+        "builtinFunctions"
+      ]
+    },
+    {
+      "required": [
+        "error"
+      ]
+    }
+  ],
+  "$defs": {
+    "int32": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "analyzeResponse": {
+      "type": "object",
+      "properties": {
+        "resolvedStatement": {
+          "type": "object"
+        },
+        "resumeBytePosition": {
+          "$ref": "#/$defs/int32"
+        },
+        "resolvedExpression": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "resolvedStatement"
+          ]
+        },
+        {
+          "required": [
+            "resolvedExpression"
+          ]
+        }
+      ]
+    },
+    "parseResponse": {
+      "type": "object",
+      "properties": {
+        "parsedStatement": {
+          "type": "object"
+        },
+        "resumeBytePosition": {
+          "$ref": "#/$defs/int32"
+        },
+        "parsedScript": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "parsedStatement"
+          ]
+        },
+        {
+          "required": [
+            "parsedScript"
+          ]
+        }
+      ]
+    },
+    "extendedParseResponse": {
+      "type": "object",
+      "properties": {
+        "parsedExpression": {
+          "type": "object"
+        },
+        "parsedType": {
+          "type": "object"
+        },
+        "parsedStatement": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "parsedExpression"
+          ]
+        },
+        {
+          "required": [
+            "parsedType"
+          ]
+        },
+        {
+          "required": [
+            "parsedStatement"
+          ]
+        }
+      ]
+    },
+    "builtinFunctionsResponse": {
+      "type": "object",
+      "properties": {
+        "function": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "types": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object"
+          }
+        },
+        "tableValuedFunction": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "analyzeSuccess": {
+      "type": "object",
+      "required": [
+        "response",
+        "debugString"
+      ],
+      "properties": {
+        "response": {
+          "$ref": "#/$defs/analyzeResponse"
+        },
+        "debugString": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "parseSuccess": {
+      "type": "object",
+      "required": [
+        "debugString"
+      ],
+      "properties": {
+        "response": {
+          "$ref": "#/$defs/parseResponse"
+        },
+        "extendedResponse": {
+          "$ref": "#/$defs/extendedParseResponse"
+        },
+        "debugString": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "response"
+          ]
+        },
+        {
+          "required": [
+            "extendedResponse"
+          ]
+        }
+      ]
+    },
+    "builtinFunctionsSuccess": {
+      "type": "object",
+      "required": [
+        "response",
+        "debugString"
+      ],
+      "properties": {
+        "response": {
+          "$ref": "#/$defs/builtinFunctionsResponse"
+        },
+        "debugString": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "origin",
+        "statusCode",
+        "statusName",
+        "message",
+        "line"
+      ],
+      "properties": {
+        "origin": {
+          "enum": [
+            "json",
+            "protocol",
+            "proto_json",
+            "googlesql",
+            "internal"
+          ]
+        },
+        "statusCode": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "statusName": {
+          "enum": [
+            "CANCELLED",
+            "UNKNOWN",
+            "INVALID_ARGUMENT",
+            "DEADLINE_EXCEEDED",
+            "NOT_FOUND",
+            "ALREADY_EXISTS",
+            "PERMISSION_DENIED",
+            "RESOURCE_EXHAUSTED",
+            "FAILED_PRECONDITION",
+            "ABORTED",
+            "OUT_OF_RANGE",
+            "UNIMPLEMENTED",
+            "INTERNAL",
+            "UNAVAILABLE",
+            "DATA_LOSS",
+            "UNAUTHENTICATED"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "operation": {
+          "enum": [
+            "analyze",
+            "parse",
+            "builtinFunctions"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

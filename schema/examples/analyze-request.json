@@ -1,0 +1,25 @@
+{
+  "protocolVersion": 1,
+  "id": "analyze-1",
+  "analyze": {
+    "request": {
+      "sqlStatement": "SELECT value FROM numbers",
+      "simpleCatalog": {
+        "name": "example",
+        "table": [
+          {
+            "name": "numbers",
+            "column": [
+              {
+                "name": "value",
+                "type": {
+                  "typeKind": "TYPE_INT64"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

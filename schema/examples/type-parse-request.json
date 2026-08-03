@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "id": "parse-type-1",
+  "parse": {
+    "extendedRequest": {
+      "sql": "ARRAY<INT64>",
+      "root": "TYPE"
+    }
+  }
+}

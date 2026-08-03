@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "id": "parse-type-1",
+  "parse": {
+    "extendedResponse": {
+      "parsedType": {
+        "astArrayTypeNode": {}
+      }
+    },
+    "debugString": "ArrayType [0-12]\n+-SimpleType [6-11]"
+  }
+}

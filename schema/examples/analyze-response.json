@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "id": "analyze-1",
+  "analyze": {
+    "response": {
+      "resolvedStatement": {
+        "resolvedQueryStmtNode": {}
+      }
+    },
+    "debugString": "QueryStmt\n+-output_column_list=..."
+  }
+}

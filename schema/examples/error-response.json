@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "id": "parse-2",
+  "error": {
+    "origin": "googlesql",
+    "statusCode": 3,
+    "statusName": "INVALID_ARGUMENT",
+    "message": "Syntax error: Expected end of input but got identifier",
+    "line": 7,
+    "operation": "parse"
+  }
+}

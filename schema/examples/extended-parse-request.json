@@ -1,0 +1,13 @@
+{
+  "protocolVersion": 1,
+  "id": "parse-expression-1",
+  "parse": {
+    "extendedRequest": {
+      "sql": "1 + 2",
+      "root": "EXPRESSION"
+    },
+    "renderOptions": {
+      "outputAscExplicitly": false
+    }
+  }
+}

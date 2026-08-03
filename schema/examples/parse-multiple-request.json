@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "id": "parse-multiple-1",
+  "parse": {
+    "extendedRequest": {
+      "sql": "SELECT 1; SELECT 2;",
+      "root": "PARSE_MULTIPLE"
+    }
+  }
+}

@@ -1,0 +1,93 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check workflows
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
+  buildifier:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check Bazel files
+        run: |
+          curl -sSfL -o buildifier \
+            https://github.com/bazelbuild/buildtools/releases/download/v8.2.1/buildifier-linux-amd64
+          chmod +x buildifier
+          ./buildifier -mode=check -lint=warn -r .
+
+  formatting:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check C++ formatting
+        run: |
+          pip install clang-format==19.1.7
+          git ls-files -z '*.cc' '*.h' | xargs -0 -r clang-format --dry-run --Werror
+      - name: Check Python formatting and lint
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "check third_party/icu/dat_to_c.py scripts/check-version.py scripts/validate-schemas.py"
+      - name: Check Python formatting
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "format --check third_party/icu/dat_to_c.py scripts/check-version.py scripts/validate-schemas.py"
+
+  schemas:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate protocol schemas and examples
+        run: |
+          pip install 'jsonschema>=4.23,<5'
+          python3 scripts/validate-schemas.py
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/local/share/boost /usr/local/share/powershell \
+            /usr/share/swift "$AGENT_TOOLSDIRECTORY"
+          df -h /
+      - uses: actions/checkout@v7
+      - name: Install LLVM 21
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+      - name: Build and test
+        run: |
+          pip install 'jsonschema>=4.23,<5'
+          bazel --version
+          clang-21 --version
+          bazel build -c opt \
+            --repo_env=CC=/usr/bin/clang-21 \
+            --repo_env=CXX=/usr/bin/clang++-21 \
+            //frontend:googlesql-frontend
+          bazel test -c opt \
+            --repo_env=CC=/usr/bin/clang-21 \
+            --repo_env=CXX=/usr/bin/clang++-21 \
+            --test_output=errors \
+            //...
+          python3 scripts/check-version.py \
+            --binary bazel-bin/frontend/googlesql-frontend
+          python3 scripts/validate-schemas.py \
+            --binary bazel-bin/frontend/googlesql-frontend

@@ -1,0 +1,126 @@
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+
+proto_library(
+    name = "protocol_proto",
+    srcs = ["protocol.proto"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@googlesql//googlesql/local_service:local_service_proto",
+        "@googlesql//googlesql/parser:parse_tree_proto",
+        "@googlesql//googlesql/proto:options_proto",
+    ],
+)
+
+cc_proto_library(
+    name = "protocol_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":protocol_proto"],
+)
+
+cc_library(
+    name = "frontend",
+    srcs = ["frontend.cc"],
+    hdrs = ["frontend.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":protocol_cc_proto",
+        "@com_google_absl//absl/cleanup",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_protobuf//:json_util",
+        "@com_google_protobuf//:protobuf",
+        "@googlesql//googlesql/common:proto_helper",
+        "@googlesql//googlesql/local_service",
+        "@googlesql//googlesql/local_service:local_service_cc_proto",
+        "@googlesql//googlesql/parser",
+        "@googlesql//googlesql/parser:parse_tree_serializer",
+        "@googlesql//googlesql/proto:options_cc_proto",
+        "@googlesql//googlesql/public:builtin_function_options",
+        "@googlesql//googlesql/public:id_string",
+        "@googlesql//googlesql/public:language_options",
+        "@googlesql//googlesql/public:parse_resume_location",
+        "@googlesql//googlesql/public:simple_catalog",
+        "@googlesql//googlesql/resolved_ast",
+        "@googlesql//googlesql/testdata:sample_catalog_impl",
+        "@icu//:icudata_lib",
+        "@icu//:icui18n_lib",
+        "@icu//:icuio_lib",
+        "@icu//:icuuc_lib",
+    ],
+)
+
+cc_library(
+    name = "compatibility",
+    srcs = ["compatibility.cc"],
+    hdrs = ["compatibility.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/cleanup",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_protobuf//:protobuf",
+        "@googlesql//googlesql/common:options_utils",
+        "@googlesql//googlesql/local_service",
+        "@googlesql//googlesql/local_service:local_service_cc_proto",
+        "@googlesql//googlesql/parser",
+        "@googlesql//googlesql/proto:options_cc_proto",
+        "@googlesql//googlesql/public:builtin_function_options",
+        "@googlesql//googlesql/public:id_string",
+        "@googlesql//googlesql/public:language_options",
+        "@googlesql//googlesql/public:parse_resume_location",
+        "@googlesql//googlesql/public:simple_catalog",
+        "@googlesql//googlesql/resolved_ast",
+        "@googlesql//googlesql/testdata:sample_catalog_impl",
+        "@icu//:icudata_lib",
+        "@icu//:icui18n_lib",
+        "@icu//:icuio_lib",
+        "@icu//:icuuc_lib",
+    ],
+)
+
+cc_binary(
+    name = "googlesql-frontend",
+    srcs = ["main.cc"],
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":compatibility",
+        ":frontend",
+        "@com_google_absl//absl/flags:config",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/flags:usage",
+    ],
+)
+
+cc_test(
+    name = "compatibility_test",
+    srcs = ["compatibility_test.cc"],
+    linkstatic = True,
+    deps = [
+        ":compatibility",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "frontend_test",
+    srcs = ["frontend_test.cc"],
+    linkstatic = True,
+    deps = [
+        ":frontend",
+        ":protocol_cc_proto",
+        "@com_google_googletest//:gtest_main",
+        "@com_google_protobuf//:json_util",
+        "@com_google_protobuf//:protobuf",
+    ],
+)

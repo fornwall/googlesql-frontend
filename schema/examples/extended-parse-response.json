@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "id": "parse-expression-1",
+  "parse": {
+    "extendedResponse": {
+      "parsedExpression": {
+        "astBinaryExpressionNode": {}
+      }
+    },
+    "debugString": "BinaryExpression(+) [0-5]"
+  }
+}

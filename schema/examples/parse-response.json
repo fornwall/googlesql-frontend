@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "id": "parse-1",
+  "parse": {
+    "response": {
+      "parsedStatement": {
+        "astQueryStatementNode": {}
+      }
+    },
+    "debugString": "QueryStatement [0-8]\n+-query=..."
+  }
+}

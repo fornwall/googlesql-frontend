@@ -1,0 +1,321 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/fornwall/googlesql-frontend/schema/request.schema.json",
+  "title": "googlesql-frontend NDJSON request",
+  "description": "One standard-input request object, encoded on one NDJSON line.",
+  "type": "object",
+  "required": [
+    "protocolVersion"
+  ],
+  "properties": {
+    "protocolVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "analyze": {
+      "$ref": "#/$defs/analyzeOperation"
+    },
+    "parse": {
+      "$ref": "#/$defs/parseOperation"
+    },
+    "builtinFunctions": {
+      "$ref": "#/$defs/builtinFunctionsOperation"
+    }
+  },
+  "additionalProperties": false,
+  "oneOf": [
+    {
+      "required": [
+        "analyze"
+      ]
+    },
+    {
+      "required": [
+        "parse"
+      ]
+    },
+    {
+      "required": [
+        "builtinFunctions"
+      ]
+    }
+  ],
+  "$defs": {
+    "protoObject": {
+      "type": "object",
+      "description": "An evolving nested ProtoJSON message. The protobuf decoder performs field-level validation."
+    },
+    "int64": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)$",
+      "description": "Canonical ProtoJSON representation of an int64. Range is checked by the protobuf decoder."
+    },
+    "parseResumeLocation": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "input": {
+          "type": "string"
+        },
+        "bytePosition": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "allowResume": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "analyzeRequest": {
+      "type": "object",
+      "properties": {
+        "options": {
+          "$ref": "#/$defs/protoObject"
+        },
+        "simpleCatalog": {
+          "$ref": "#/$defs/protoObject"
+        },
+        "descriptorPoolList": {
+          "$ref": "#/$defs/protoObject"
+        },
+        "registeredCatalogId": {
+          "$ref": "#/$defs/int64"
+        },
+        "sqlStatement": {
+          "type": "string"
+        },
+        "parseResumeLocation": {
+          "$ref": "#/$defs/parseResumeLocation"
+        },
+        "sqlExpression": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "sqlStatement"
+          ]
+        },
+        {
+          "required": [
+            "parseResumeLocation"
+          ]
+        },
+        {
+          "required": [
+            "sqlExpression"
+          ]
+        }
+      ]
+    },
+    "parseRequest": {
+      "type": "object",
+      "properties": {
+        "sqlStatement": {
+          "type": "string"
+        },
+        "parseResumeLocation": {
+          "$ref": "#/$defs/parseResumeLocation"
+        },
+        "options": {
+          "$ref": "#/$defs/protoObject"
+        },
+        "allowScript": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "sqlStatement"
+          ]
+        },
+        {
+          "required": [
+            "parseResumeLocation"
+          ]
+        }
+      ]
+    },
+    "extendedParseRequest": {
+      "type": "object",
+      "required": [
+        "sql",
+        "root"
+      ],
+      "properties": {
+        "sql": {
+          "type": "string"
+        },
+        "root": {
+          "enum": [
+            "EXPRESSION",
+            "TYPE",
+            "PARSE_MULTIPLE"
+          ]
+        },
+        "options": {
+          "$ref": "#/$defs/protoObject"
+        }
+      },
+      "additionalProperties": false
+    },
+    "renderOptions": {
+      "type": "object",
+      "properties": {
+        "outputAscExplicitly": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "functionSignatureId": {
+      "description": "A ProtoJSON enum name or its accepted numeric representation.",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        }
+      ]
+    },
+    "enabledRewrite": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/functionSignatureId"
+        },
+        "value": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "builtinFunctionsRequest": {
+      "type": "object",
+      "properties": {
+        "languageOptions": {
+          "$ref": "#/$defs/protoObject"
+        },
+        "includeFunctionIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/functionSignatureId"
+          }
+        },
+        "excludeFunctionIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/functionSignatureId"
+          }
+        },
+        "enabledRewritesMapEntry": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/enabledRewrite"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "analyzeOperation": {
+      "type": "object",
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/analyzeRequest"
+        },
+        "namedCatalog": {
+          "enum": [
+            "CATALOG_NONE",
+            "CATALOG_SAMPLE"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "namedCatalog"
+            ],
+            "properties": {
+              "request": {
+                "required": [
+                  "simpleCatalog"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "namedCatalog"
+            ],
+            "properties": {
+              "request": {
+                "required": [
+                  "registeredCatalogId"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "parseOperation": {
+      "type": "object",
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/parseRequest"
+        },
+        "extendedRequest": {
+          "$ref": "#/$defs/extendedParseRequest"
+        },
+        "renderOptions": {
+          "$ref": "#/$defs/renderOptions"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "request"
+          ]
+        },
+        {
+          "required": [
+            "extendedRequest"
+          ]
+        }
+      ]
+    },
+    "builtinFunctionsOperation": {
+      "type": "object",
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/builtinFunctionsRequest"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
