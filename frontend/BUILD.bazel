@@ -62,7 +62,6 @@ cc_library(
         "@googlesql//googlesql/testdata:sample_catalog_impl",
         "@icu//:icudata_lib",
         "@icu//:icui18n_lib",
-        "@icu//:icuio_lib",
         "@icu//:icuuc_lib",
     ],
 )
