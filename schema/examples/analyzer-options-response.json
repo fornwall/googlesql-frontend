@@ -1,0 +1,26 @@
+{
+  "protocolVersion": 1,
+  "id": "analyzer-options-1",
+  "analyzerOptions": {
+    "response": {
+      "languageOptions": {
+        "nameResolutionMode": "NAME_RESOLUTION_DEFAULT",
+        "productMode": "PRODUCT_INTERNAL",
+        "errorOnDeprecatedSyntax": false,
+        "supportedStatementKinds": [
+          "RESOLVED_QUERY_STMT"
+        ]
+      },
+      "errorMessageMode": "ERROR_MESSAGE_ONE_LINE",
+      "defaultTimezone": "America/Los_Angeles",
+      "pruneUnusedColumns": false,
+      "allowUndeclaredParameters": false,
+      "parameterMode": "PARAMETER_NAMED",
+      "statementContext": "CONTEXT_DEFAULT",
+      "preserveColumnAliases": true,
+      "createNewColumnForEachProjectedOutput": false,
+      "preserveUnnecessaryCast": false,
+      "replaceTableNotFoundErrorWithTvfErrorIfApplicable": true
+    }
+  }
+}

@@ -3,10 +3,25 @@
   "id": "builtins-1",
   "builtinFunctions": {
     "response": {
-      "function": [],
-      "types": {},
-      "tableValuedFunction": []
-    },
-    "debugString": ""
+      "function": [
+        {
+          "namePath": [
+            "concat"
+          ],
+          "group": "GoogleSQL",
+          "mode": "SCALAR"
+        }
+      ],
+      "types": {
+        "ARRAY_ZIP_MODE": {
+          "typeKind": "TYPE_ENUM",
+          "enumType": {
+            "enumName": "googlesql.functions.ArrayZipEnums.ArrayZipMode",
+            "enumFileName": "googlesql/public/functions/array_zip_mode.proto",
+            "isOpaque": true
+          }
+        }
+      }
+    }
   }
 }

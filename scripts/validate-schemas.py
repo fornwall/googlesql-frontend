@@ -21,6 +21,13 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schema"
 EXAMPLE_DIR = SCHEMA_DIR / "examples"
+OPERATIONS = (
+    "analyze",
+    "parse",
+    "builtinFunctions",
+    "languageOptions",
+    "analyzerOptions",
+)
 
 parser = argparse.ArgumentParser(
     description="validate protocol schemas, examples, and optional binary output"
@@ -126,6 +133,34 @@ rejected_requests = [
     },
     {"protocolVersion": 1, "id": "", "parse": {"request": {"sqlStatement": ""}}},
     {"protocolVersion": 2, "parse": {"request": {"sqlStatement": "SELECT 1"}}},
+    {"protocolVersion": 1, "languageOptions": {"request": {"unknown": True}}},
+    {"protocolVersion": 1, "analyzerOptions": {"request": {"maximumFeatures": True}}},
+    {"protocolVersion": 1, "languageOptions": {}, "analyzerOptions": {}},
+    {
+        "protocolVersion": 1,
+        "analyze": {
+            "request": {"sqlStatement": "SELECT 1"},
+            "languageOptionsPreset": {"features": "MAXIMUM"},
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "parse": {
+            "request": {"sqlStatement": "SELECT 1"},
+            "languageOptionsPreset": {"allReservableKeywords": True},
+        },
+    },
+    {
+        "protocolVersion": 1,
+        "responseOptions": {"omitResponse": True},
+        "parse": {"request": {"sqlStatement": "SELECT 1"}},
+    },
+    {
+        "protocolVersion": 1,
+        "responseOptions": {"omitResponseProto": "true"},
+        "parse": {"request": {"sqlStatement": "SELECT 1"}},
+    },
+    {"protocolVersion": 1, "responseOptions": {"omitResponseProto": True}},
 ]
 
 rejected_responses = [
@@ -155,6 +190,36 @@ rejected_responses = [
             "extendedResponse": {"parsedExpression": {}},
             "debugString": "",
         },
+    },
+    {
+        "protocolVersion": 1,
+        "builtinFunctions": {
+            "response": {"function": []},
+            "debugString": "",
+        },
+    },
+    # omitResponseProto drops the payload; it never turns the surrounding
+    # message into an empty object, and debugString stays required.
+    {"protocolVersion": 1, "analyze": {"response": {}, "debugString": ""}},
+    {"protocolVersion": 1, "parse": {"response": {}, "debugString": ""}},
+    {"protocolVersion": 1, "parse": {"extendedResponse": {}, "debugString": ""}},
+    {"protocolVersion": 1, "analyze": {"response": {"resumeBytePosition": 9}}},
+    {"protocolVersion": 1, "parse": {"response": {"resumeBytePosition": 9}}},
+    {
+        "protocolVersion": 1,
+        "analyze": {
+            "response": {
+                "resolvedStatement": {},
+                "resolvedExpression": {},
+                "resumeBytePosition": 9,
+            },
+            "debugString": "",
+        },
+    },
+    {"protocolVersion": 1, "languageOptions": {}},
+    {
+        "protocolVersion": 1,
+        "analyzerOptions": {"response": {}, "debugString": ""},
     },
     {
         "protocolVersion": 1,
@@ -329,9 +394,7 @@ if args.binary is not None:
                 f"response {index} for {path} has id {response.get('id')!r}; "
                 f"expected {request.get('id')!r}"
             )
-        operation = next(
-            name for name in ("analyze", "parse", "builtinFunctions") if name in request
-        )
+        operation = next(name for name in OPERATIONS if name in request)
         if operation not in response:
             sys.exit(
                 f"response {index} for {path} did not return successful "

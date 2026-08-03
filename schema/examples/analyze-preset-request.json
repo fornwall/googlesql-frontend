@@ -1,0 +1,22 @@
+{
+  "protocolVersion": 1,
+  "id": "analyze-preset-1",
+  "analyze": {
+    "namedCatalog": "CATALOG_SAMPLE",
+    "languageOptionsPreset": {
+      "features": "LANGUAGE_FEATURES_MAXIMUM",
+      "allReservableKeywordsReserved": true,
+      "allStatementKindsSupported": true
+    },
+    "request": {
+      "sqlStatement": "SELECT Key + 1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY Key) = 1",
+      "options": {
+        "languageOptions": {
+          "enabledLanguageFeatures": [
+            "FEATURE_COLLATION_SUPPORT"
+          ]
+        }
+      }
+    }
+  }
+}

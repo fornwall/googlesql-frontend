@@ -1,0 +1,9 @@
+{
+  "protocolVersion": 1,
+  "id": "language-options-1",
+  "languageOptions": {
+    "request": {
+      "maximumFeatures": true
+    }
+  }
+}

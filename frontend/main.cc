@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
   int line_number = 0;
   while (std::getline(std::cin, line)) {
     ++line_number;
-    if (line.empty()) {
+    if (googlesql_frontend::IsBlankInputLine(line)) {
       continue;
     }
     googlesql_frontend::ProcessResult result =

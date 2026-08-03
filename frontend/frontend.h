@@ -29,6 +29,11 @@ class Frontend {
   googlesql::local_service::GoogleSqlLocalServiceImpl service_;
 };
 
+// True when an input line carries no request and is therefore skipped rather
+// than reported as an error. Lines holding only whitespace are blank: an
+// NDJSON stream should behave the way it looks when read or edited by hand.
+bool IsBlankInputLine(absl::string_view input);
+
 std::string VersionString();
 
 }  // namespace googlesql_frontend

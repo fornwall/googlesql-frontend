@@ -86,6 +86,77 @@ TEST(FrontendTest, AnalyzesWithNamedCatalogs) {
       std::string::npos);
 }
 
+TEST(FrontendTest, UnsetAnalyzerOptionsUseGoogleSqlDefaults) {
+  Frontend frontend;
+  // preserve_column_aliases defaults to true in AnalyzerOptions, while the
+  // protobuf zero value is false. An absent field keeps the select-list alias.
+  ProcessResult absent = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT SUM(Key) AS n FROM KeyValue"}}})json",
+      1);
+  ASSERT_TRUE(absent.ok) << absent.output;
+  FrontendResponse absent_response = ParseResponse(absent.output);
+  const std::string& absent_debug = absent_response.analyze().debug_string();
+  EXPECT_NE(absent_debug.find("$aggregate.n#3 AS n"), std::string::npos)
+      << absent_debug;
+
+  ProcessResult empty_options = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT SUM(Key) AS n FROM KeyValue","options":{}}}})json",
+      2);
+  ASSERT_TRUE(empty_options.ok) << empty_options.output;
+  FrontendResponse empty_options_response = ParseResponse(empty_options.output);
+  EXPECT_EQ(empty_options_response.analyze().debug_string(), absent_debug);
+
+  // An explicit value still wins, including an explicit false.
+  ProcessResult explicit_false = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT SUM(Key) AS n FROM KeyValue","options":{"preserveColumnAliases":false}}}})json",
+      3);
+  ASSERT_TRUE(explicit_false.ok) << explicit_false.output;
+  FrontendResponse explicit_false_response =
+      ParseResponse(explicit_false.output);
+  const std::string& explicit_false_debug =
+      explicit_false_response.analyze().debug_string();
+  EXPECT_NE(explicit_false_debug.find("$aggregate.$agg1#3 AS n"),
+            std::string::npos)
+      << explicit_false_debug;
+
+  // The same rule applies to the inline-catalog path.
+  ProcessResult inline_catalog = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"request":{"sqlStatement":"SELECT SUM(value) AS n FROM numbers","simpleCatalog":{"name":"example","builtinFunctionOptions":{},"table":[{"name":"numbers","column":[{"name":"value","type":{"typeKind":"TYPE_INT64"}}]}]}}}})json",
+      4);
+  ASSERT_TRUE(inline_catalog.ok) << inline_catalog.output;
+  FrontendResponse inline_response = ParseResponse(inline_catalog.output);
+  const std::string& inline_debug = inline_response.analyze().debug_string();
+  EXPECT_NE(inline_debug.find("$aggregate.n#2 AS n"), std::string::npos)
+      << inline_debug;
+}
+
+TEST(FrontendTest, UnsetTableNotFoundOptionUsesGoogleSqlDefault) {
+  Frontend frontend;
+  // replace_table_not_found_error_with_tvf_error_if_applicable also defaults
+  // to true while the protobuf zero value is false.
+  ProcessResult absent = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT 1 FROM tvf_exactly_1_int64_arg"}}})json",
+      1);
+  ASSERT_FALSE(absent.ok);
+  FrontendResponse absent_response = ParseResponse(absent.output);
+  EXPECT_EQ(absent_response.error().origin(), "googlesql");
+  EXPECT_NE(absent_response.error().message().find(
+                "Table-valued function must be called with an argument list"),
+            std::string::npos)
+      << absent_response.error().message();
+
+  ProcessResult explicit_false = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT 1 FROM tvf_exactly_1_int64_arg","options":{"replaceTableNotFoundErrorWithTvfErrorIfApplicable":false}}}})json",
+      2);
+  ASSERT_FALSE(explicit_false.ok);
+  FrontendResponse explicit_false_response =
+      ParseResponse(explicit_false.output);
+  EXPECT_NE(explicit_false_response.error().message().find(
+                "Table not found: tvf_exactly_1_int64_arg"),
+            std::string::npos)
+      << explicit_false_response.error().message();
+}
+
 TEST(FrontendTest, ResolvedDebugStringRetainsParseLocations) {
   Frontend frontend;
   ProcessResult graph = frontend.ProcessLine(
@@ -148,6 +219,291 @@ TEST(FrontendTest, SampleCatalogPrevalidatesAnalyzerOptions) {
   EXPECT_EQ(response.error().status_name(), "INVALID_ARGUMENT");
   EXPECT_NE(response.error().message().find("ANNOTATION_FRAMEWORK"),
             std::string::npos);
+}
+
+TEST(FrontendTest, PresetLanguageFeaturesMergeWithExplicitOnes) {
+  Frontend frontend;
+  // FEATURE_COLLATION_SUPPORT alone is rejected because it needs
+  // FEATURE_ANNOTATION_FRAMEWORK, which the maximum set already enables. The
+  // request therefore reads as maximum-plus-collation rather than
+  // collation-only.
+  ProcessResult maximum_plus = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"id":"max-plus","analyze":{"namedCatalog":"CATALOG_SAMPLE","languageOptionsPreset":{"features":"LANGUAGE_FEATURES_MAXIMUM"},"request":{"sqlStatement":"SELECT 1","options":{"languageOptions":{"enabledLanguageFeatures":["FEATURE_COLLATION_SUPPORT"]}}}}})json",
+      1);
+  ASSERT_TRUE(maximum_plus.ok) << maximum_plus.output;
+  EXPECT_EQ(ParseResponse(maximum_plus.output).id(), "max-plus");
+
+  // The same explicit list without a preset keeps failing, so the success
+  // above comes from the preset rather than from the explicit feature.
+  ProcessResult explicit_only = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT 1","options":{"languageOptions":{"enabledLanguageFeatures":["FEATURE_COLLATION_SUPPORT"]}}}}})json",
+      2);
+  ASSERT_FALSE(explicit_only.ok);
+  EXPECT_NE(ParseResponse(explicit_only.output)
+                .error()
+                .message()
+                .find("ANNOTATION_FRAMEWORK"),
+            std::string::npos);
+
+  // Explicit scalars replace the preset's rather than adding to it:
+  // PRODUCT_EXTERNAL survives the maximum feature set and hides INT32.
+  ProcessResult scalar_override = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","languageOptionsPreset":{"features":"LANGUAGE_FEATURES_MAXIMUM"},"request":{"sqlStatement":"SELECT CAST(1 AS INT32)","options":{"languageOptions":{"productMode":"PRODUCT_EXTERNAL"}}}}})json",
+      3);
+  ASSERT_FALSE(scalar_override.ok);
+  EXPECT_NE(
+      ParseResponse(scalar_override.output).error().message().find("INT32"),
+      std::string::npos);
+}
+
+TEST(FrontendTest, PresetReservesAllReservableKeywords) {
+  Frontend frontend;
+  // Without reserved keywords the parser rejects the statement from the
+  // qualify_clause_nonreserved production, before the analyzer sees it.
+  ProcessResult nonreserved = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","languageOptionsPreset":{},"request":{"sqlStatement":"SELECT Key+1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY Key) = 1","options":{"languageOptions":{"enabledLanguageFeatures":["FEATURE_ANALYTIC_FUNCTIONS","FEATURE_QUALIFY"]}}}}})json",
+      1);
+  ASSERT_FALSE(nonreserved.ok);
+  EXPECT_NE(ParseResponse(nonreserved.output)
+                .error()
+                .message()
+                .find("QUALIFY clause must be used in conjunction with"),
+            std::string::npos);
+
+  ProcessResult reserved = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","languageOptionsPreset":{"allReservableKeywordsReserved":true},"request":{"sqlStatement":"SELECT Key+1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY Key) = 1","options":{"languageOptions":{"enabledLanguageFeatures":["FEATURE_ANALYTIC_FUNCTIONS","FEATURE_QUALIFY"]}}}}})json",
+      2);
+  ASSERT_TRUE(reserved.ok) << reserved.output;
+  EXPECT_NE(ParseResponse(reserved.output)
+                .analyze()
+                .debug_string()
+                .find("AnalyticScan"),
+            std::string::npos);
+}
+
+TEST(FrontendTest, PresetAppliesToBothParseInputs) {
+  Frontend frontend;
+  ProcessResult nonreserved = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"parse":{"languageOptionsPreset":{},"request":{"sqlStatement":"SELECT Key+1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY Key) = 1","options":{"enabledLanguageFeatures":["FEATURE_ANALYTIC_FUNCTIONS","FEATURE_QUALIFY"]}}}})json",
+      1);
+  ASSERT_FALSE(nonreserved.ok);
+  EXPECT_NE(ParseResponse(nonreserved.output)
+                .error()
+                .message()
+                .find("QUALIFY clause must be used in conjunction with"),
+            std::string::npos);
+
+  ProcessResult native = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"parse":{"languageOptionsPreset":{"allReservableKeywordsReserved":true},"request":{"sqlStatement":"SELECT Key+1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY Key) = 1","options":{"enabledLanguageFeatures":["FEATURE_ANALYTIC_FUNCTIONS","FEATURE_QUALIFY"]}}}})json",
+      2);
+  ASSERT_TRUE(native.ok) << native.output;
+  EXPECT_NE(ParseResponse(native.output).parse().debug_string().find("Qualify"),
+            std::string::npos);
+
+  // The extended parser roots read the same preset.
+  ProcessResult extended_nonreserved = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"parse":{"languageOptionsPreset":{},"extendedRequest":{"root":"PARSE_MULTIPLE","sql":"SELECT Key+1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY Key) = 1","options":{"enabledLanguageFeatures":["FEATURE_ANALYTIC_FUNCTIONS","FEATURE_QUALIFY"]}}}})json",
+      3);
+  ASSERT_FALSE(extended_nonreserved.ok);
+  EXPECT_NE(ParseResponse(extended_nonreserved.output)
+                .error()
+                .message()
+                .find("QUALIFY clause must be used in conjunction with"),
+            std::string::npos);
+
+  ProcessResult extended = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"parse":{"languageOptionsPreset":{"allReservableKeywordsReserved":true},"extendedRequest":{"root":"PARSE_MULTIPLE","sql":"SELECT Key+1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY Key) = 1","options":{"enabledLanguageFeatures":["FEATURE_ANALYTIC_FUNCTIONS","FEATURE_QUALIFY"]}}}})json",
+      4);
+  ASSERT_TRUE(extended.ok) << extended.output;
+  EXPECT_EQ(ParseResponse(extended.output)
+                .parse()
+                .extended_response()
+                .parsed_statement_size(),
+            1);
+}
+
+TEST(FrontendTest, PresetSupportsAllStatementKinds) {
+  Frontend frontend;
+  // The maximum feature set alone keeps LanguageOptions' default of query
+  // statements only.
+  ProcessResult query_only = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","languageOptionsPreset":{"features":"LANGUAGE_FEATURES_MAXIMUM"},"request":{"sqlStatement":"CREATE TABLE t (x INT64)"}}})json",
+      1);
+  ASSERT_FALSE(query_only.ok);
+  EXPECT_NE(ParseResponse(query_only.output)
+                .error()
+                .message()
+                .find("Statement not supported: CreateTableStatement"),
+            std::string::npos);
+
+  ProcessResult all_kinds = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","languageOptionsPreset":{"features":"LANGUAGE_FEATURES_MAXIMUM","allStatementKindsSupported":true},"request":{"sqlStatement":"CREATE TABLE t (x INT64)"}}})json",
+      2);
+  ASSERT_TRUE(all_kinds.ok) << all_kinds.output;
+  EXPECT_NE(ParseResponse(all_kinds.output)
+                .analyze()
+                .debug_string()
+                .find("CreateTableStmt"),
+            std::string::npos);
+
+  // Because the empty statement-kind list means "all", naming kinds explicitly
+  // alongside allStatementKindsSupported narrows the set to exactly those.
+  ProcessResult narrowed = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","languageOptionsPreset":{"features":"LANGUAGE_FEATURES_MAXIMUM","allStatementKindsSupported":true},"request":{"sqlStatement":"SELECT 1","options":{"languageOptions":{"supportedStatementKinds":["RESOLVED_CREATE_TABLE_STMT"]}}}}})json",
+      3);
+  ASSERT_FALSE(narrowed.ok);
+  EXPECT_NE(ParseResponse(narrowed.output)
+                .error()
+                .message()
+                .find("Statement not supported: QueryStatement"),
+            std::string::npos);
+}
+
+TEST(FrontendTest, PresetDevelopmentAndLanguageVersionAreAccepted) {
+  Frontend frontend;
+  ProcessResult development = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","languageOptionsPreset":{"features":"LANGUAGE_FEATURES_DEVELOPMENT"},"request":{"sqlStatement":"SELECT 1"}}})json",
+      1);
+  ASSERT_TRUE(development.ok) << development.output;
+
+  // A language version enables the features frozen into that version.
+  // FEATURE_QUALIFY belongs to v1.3, while FEATURE_ANALYTIC_FUNCTIONS carries
+  // no version annotation and so must be named explicitly on top of it.
+  ProcessResult version = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","languageOptionsPreset":{"languageVersion":"VERSION_1_3","allReservableKeywordsReserved":true},"request":{"sqlStatement":"SELECT Key+1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY Key) = 1","options":{"languageOptions":{"enabledLanguageFeatures":["FEATURE_ANALYTIC_FUNCTIONS"]}}}}})json",
+      2);
+  ASSERT_TRUE(version.ok) << version.output;
+  EXPECT_NE(ParseResponse(version.output)
+                .analyze()
+                .debug_string()
+                .find("AnalyticScan"),
+            std::string::npos);
+}
+
+TEST(FrontendTest, NamedCatalogBaselineSurvivesWithoutAPreset) {
+  Frontend frontend;
+  // Neither languageOptions nor languageOptionsPreset: the named-catalog
+  // baseline of maximum features, all statement kinds, and all reservable
+  // keywords still applies.
+  ProcessResult baseline = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT Key+1 AS c FROM KeyValue QUALIFY ROW_NUMBER() OVER (ORDER BY Key) = 1"}}})json",
+      1);
+  ASSERT_TRUE(baseline.ok) << baseline.output;
+
+  ProcessResult statement_kind = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"CREATE TABLE t (x INT64)"}}})json",
+      2);
+  ASSERT_TRUE(statement_kind.ok) << statement_kind.output;
+
+  // An explicit preset takes over from that baseline.
+  ProcessResult preset = frontend.ProcessLine(
+      R"json({"protocolVersion":1,"analyze":{"namedCatalog":"CATALOG_NONE","languageOptionsPreset":{},"request":{"sqlStatement":"CREATE TABLE t (x INT64)"}}})json",
+      3);
+  ASSERT_FALSE(preset.ok);
+  EXPECT_NE(ParseResponse(preset.output)
+                .error()
+                .message()
+                .find("Statement not supported: CreateTableStatement"),
+            std::string::npos);
+}
+
+TEST(FrontendTest, ReportsLanguageOptionsOfThisBuild) {
+  Frontend frontend;
+  ProcessResult defaults = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"lo","languageOptions":{"request":{}}})", 1);
+  ASSERT_TRUE(defaults.ok) << defaults.output;
+  FrontendResponse defaults_response = ParseResponse(defaults.output);
+  EXPECT_EQ(defaults_response.id(), "lo");
+  ASSERT_TRUE(defaults_response.has_language_options());
+  EXPECT_EQ(defaults_response.language_options()
+                .response()
+                .enabled_language_features_size(),
+            0);
+
+  // The request message is optional; omitting it reads the same defaults.
+  ProcessResult omitted =
+      frontend.ProcessLine(R"({"protocolVersion":1,"languageOptions":{}})", 2);
+  ASSERT_TRUE(omitted.ok) << omitted.output;
+  EXPECT_EQ(ParseResponse(omitted.output)
+                .language_options()
+                .response()
+                .enabled_language_features_size(),
+            0);
+
+  ProcessResult maximum = frontend.ProcessLine(
+      R"({"protocolVersion":1,"languageOptions":{"request":{"maximumFeatures":true}}})",
+      3);
+  ASSERT_TRUE(maximum.ok) << maximum.output;
+  FrontendResponse maximum_response = ParseResponse(maximum.output);
+  const googlesql::LanguageOptionsProto& maximum_options =
+      maximum_response.language_options().response();
+  EXPECT_GT(maximum_options.enabled_language_features_size(), 100);
+
+  // The reply is this build's own vintage: the same feature set the
+  // LANGUAGE_FEATURES_MAXIMUM preset applies, including the QUALIFY
+  // reservation that GoogleSQL makes part of it.
+  bool has_qualify = false;
+  for (const std::string& keyword : maximum_options.reserved_keywords()) {
+    has_qualify = has_qualify || keyword == "QUALIFY";
+  }
+  EXPECT_TRUE(has_qualify) << maximum.output;
+
+  ProcessResult version = frontend.ProcessLine(
+      R"({"protocolVersion":1,"languageOptions":{"request":{"languageVersion":"VERSION_1_3"}}})",
+      4);
+  ASSERT_TRUE(version.ok) << version.output;
+  FrontendResponse version_response = ParseResponse(version.output);
+  const googlesql::LanguageOptionsProto& version_options =
+      version_response.language_options().response();
+  EXPECT_GT(version_options.enabled_language_features_size(), 0);
+  EXPECT_LT(version_options.enabled_language_features_size(),
+            maximum_options.enabled_language_features_size());
+}
+
+TEST(FrontendTest, ReportsAnalyzerOptionDefaultsOfThisBuild) {
+  Frontend frontend;
+  ProcessResult result = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"ao","analyzerOptions":{"request":{}}})", 1);
+  ASSERT_TRUE(result.ok) << result.output;
+  FrontendResponse response = ParseResponse(result.output);
+  EXPECT_EQ(response.id(), "ao");
+  ASSERT_TRUE(response.has_analyzer_options());
+
+  // These are the defaults the frontend restores for analyzer options the
+  // request leaves unset, so this operation is how a client discovers them.
+  const googlesql::AnalyzerOptionsProto& options =
+      response.analyzer_options().response();
+  EXPECT_TRUE(options.preserve_column_aliases());
+  EXPECT_TRUE(
+      options.replace_table_not_found_error_with_tvf_error_if_applicable());
+  EXPECT_EQ(options.statement_context(), googlesql::CONTEXT_DEFAULT);
+  EXPECT_EQ(options.parameter_mode(), googlesql::PARAMETER_NAMED);
+
+  ProcessResult omitted =
+      frontend.ProcessLine(R"({"protocolVersion":1,"analyzerOptions":{}})", 2);
+  ASSERT_TRUE(omitted.ok) << omitted.output;
+  EXPECT_TRUE(ParseResponse(omitted.output)
+                  .analyzer_options()
+                  .response()
+                  .preserve_column_aliases());
+}
+
+TEST(FrontendTest, NamesOptionOperationsInErrors) {
+  Frontend frontend;
+  ProcessResult conflict = frontend.ProcessLine(
+      R"({"protocolVersion":1,"languageOptions":{},"analyzerOptions":{}})", 1);
+  ASSERT_FALSE(conflict.ok);
+  EXPECT_EQ(ParseResponse(conflict.output).error().message(),
+            "exactly one operation is allowed; found languageOptions and "
+            "analyzerOptions");
+
+  ProcessResult unsupported_version =
+      frontend.ProcessLine(R"({"protocolVersion":2,"analyzerOptions":{}})", 2);
+  ASSERT_FALSE(unsupported_version.ok);
+  FrontendResponse version_response = ParseResponse(unsupported_version.output);
+  EXPECT_EQ(version_response.error().origin(), "protocol");
+  EXPECT_EQ(version_response.error().operation(), "analyzerOptions");
+  EXPECT_FALSE(version_response.error().has_location());
 }
 
 TEST(FrontendTest, RejectsConflictingCatalogSelectors) {
@@ -293,6 +649,243 @@ TEST(FrontendTest, EnumeratesBuiltinFunctions) {
   ASSERT_TRUE(result.ok) << result.output;
   FrontendResponse response = ParseResponse(result.output);
   EXPECT_GT(response.builtin_functions().response().function_size(), 0);
+
+  // Builtin function enumeration has no human-readable rendering of its own,
+  // so the reply carries no debugString for a client to learn to ignore.
+  EXPECT_EQ(result.output.find("debugString"), std::string::npos)
+      << result.output;
+}
+
+TEST(FrontendTest, BuiltinFunctionTypesFollowEnabledLanguageFeatures) {
+  Frontend frontend;
+  // No enabled feature contributes a builtin type, so the map is empty. An
+  // empty map is omitted from the response object rather than printed as {}.
+  ProcessResult none = frontend.ProcessLine(
+      R"({"protocolVersion":1,"builtinFunctions":{"request":{"languageOptions":{"productMode":"PRODUCT_EXTERNAL"}}}})",
+      1);
+  ASSERT_TRUE(none.ok) << none.output;
+  EXPECT_TRUE(ParseResponse(none.output)
+                  .builtin_functions()
+                  .response()
+                  .types()
+                  .empty());
+  EXPECT_EQ(none.output.find(R"("types":)"), std::string::npos) << none.output;
+
+  // FEATURE_MULTIWAY_UNNEST contributes the ARRAY_ZIP_MODE enum, so the same
+  // operation reports a populated map. Absence above is a measured negative.
+  ProcessResult zip_mode = frontend.ProcessLine(
+      R"({"protocolVersion":1,"builtinFunctions":{"request":{"languageOptions":{"productMode":"PRODUCT_EXTERNAL","enabledLanguageFeatures":["FEATURE_MULTIWAY_UNNEST"]}}}})",
+      2);
+  ASSERT_TRUE(zip_mode.ok) << zip_mode.output;
+  FrontendResponse zip_mode_response = ParseResponse(zip_mode.output);
+  const auto& types = zip_mode_response.builtin_functions().response().types();
+  ASSERT_TRUE(types.contains("ARRAY_ZIP_MODE")) << zip_mode.output;
+  EXPECT_EQ(types.at("ARRAY_ZIP_MODE").type_kind(), googlesql::TYPE_ENUM);
+}
+
+TEST(FrontendTest, OmitsResponseProtoWhileKeepingDebugString) {
+  Frontend frontend;
+  const std::string statement =
+      R"("analyze":{"namedCatalog":"CATALOG_SAMPLE","request":{"sqlStatement":"SELECT Key, Value FROM KeyValue WHERE Key > 3 ORDER BY Value"}}})";
+
+  ProcessResult full =
+      frontend.ProcessLine(R"({"protocolVersion":1,)" + statement, 1);
+  ASSERT_TRUE(full.ok) << full.output;
+  ProcessResult omitted = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},)" +
+          statement,
+      2);
+  ASSERT_TRUE(omitted.ok) << omitted.output;
+
+  FrontendResponse full_response = ParseResponse(full.output);
+  FrontendResponse omitted_response = ParseResponse(omitted.output);
+  ASSERT_TRUE(omitted_response.has_analyze());
+  EXPECT_EQ(omitted_response.analyze().debug_string(),
+            full_response.analyze().debug_string());
+  EXPECT_TRUE(full_response.analyze().has_response());
+  EXPECT_FALSE(omitted_response.analyze().has_response());
+  EXPECT_EQ(omitted.output.find("resolvedStatement"), std::string::npos)
+      << omitted.output;
+  // The payload is the dominant cost of a reply a client only reads
+  // debugString from: dropping it saves the great majority of the bytes.
+  EXPECT_LT(omitted.output.size() * 3, full.output.size())
+      << omitted.output.size() << " of " << full.output.size();
+
+  // An explicit false is the documented default rather than a third mode.
+  ProcessResult explicit_false = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":false},)" +
+          statement,
+      3);
+  ASSERT_TRUE(explicit_false.ok) << explicit_false.output;
+  EXPECT_EQ(explicit_false.output, full.output);
+
+  // The same holds for parse, whose payload is the serialized parse tree.
+  ProcessResult full_parse = frontend.ProcessLine(
+      R"({"protocolVersion":1,"parse":{"request":{"sqlStatement":"SELECT Key, Value FROM KeyValue WHERE Key > 3 ORDER BY Value"}}})",
+      4);
+  ASSERT_TRUE(full_parse.ok) << full_parse.output;
+  ProcessResult omitted_parse = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"parse":{"request":{"sqlStatement":"SELECT Key, Value FROM KeyValue WHERE Key > 3 ORDER BY Value"}}})",
+      5);
+  ASSERT_TRUE(omitted_parse.ok) << omitted_parse.output;
+  FrontendResponse omitted_parse_response = ParseResponse(omitted_parse.output);
+  EXPECT_EQ(omitted_parse_response.parse().debug_string(),
+            ParseResponse(full_parse.output).parse().debug_string());
+  EXPECT_FALSE(omitted_parse_response.parse().has_response());
+  EXPECT_EQ(omitted_parse.output.find("parsedStatement"), std::string::npos)
+      << omitted_parse.output;
+  EXPECT_LT(omitted_parse.output.size() * 3, full_parse.output.size())
+      << omitted_parse.output.size() << " of " << full_parse.output.size();
+}
+
+TEST(FrontendTest, OmitResponseProtoPreservesResumeBytePosition) {
+  Frontend frontend;
+  // resume_byte_position sits beside the payload in the same upstream message,
+  // outside the oneof that carries the AST, so walking a multi-statement input
+  // keeps working with the payload dropped.
+  ProcessResult parse = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"parse":{"request":{"parseResumeLocation":{"input":"SELECT 1; SELECT 2","bytePosition":0,"allowResume":true}}}})",
+      1);
+  ASSERT_TRUE(parse.ok) << parse.output;
+  FrontendResponse parse_response = ParseResponse(parse.output);
+  ASSERT_TRUE(parse_response.parse().has_response());
+  EXPECT_FALSE(parse_response.parse().response().has_parsed_statement());
+  const int parse_resume =
+      parse_response.parse().response().resume_byte_position();
+  EXPECT_EQ(parse_resume, 9);
+  EXPECT_NE(parse_response.parse().debug_string().find("QueryStatement"),
+            std::string::npos);
+
+  // Feeding the position back walks to the next statement, as documented.
+  ProcessResult parse_next = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"parse":{"request":{"parseResumeLocation":{"input":"SELECT 1; SELECT 2","bytePosition":9,"allowResume":true}}}})",
+      2);
+  ASSERT_TRUE(parse_next.ok) << parse_next.output;
+  EXPECT_EQ(ParseResponse(parse_next.output)
+                .parse()
+                .response()
+                .resume_byte_position(),
+            18);
+
+  ProcessResult analyze = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"analyze":{"request":{"parseResumeLocation":{"input":"SELECT 1; SELECT 2","bytePosition":0,"allowResume":true}}}})",
+      3);
+  ASSERT_TRUE(analyze.ok) << analyze.output;
+  FrontendResponse analyze_response = ParseResponse(analyze.output);
+  ASSERT_TRUE(analyze_response.analyze().has_response());
+  EXPECT_FALSE(analyze_response.analyze().response().has_resolved_statement());
+  EXPECT_EQ(analyze_response.analyze().response().resume_byte_position(), 9);
+  EXPECT_NE(analyze_response.analyze().debug_string().find("QueryStmt"),
+            std::string::npos);
+
+  ProcessResult analyze_next = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"analyze":{"request":{"parseResumeLocation":{"input":"SELECT 1; SELECT 2","bytePosition":9,"allowResume":true}}}})",
+      4);
+  ASSERT_TRUE(analyze_next.ok) << analyze_next.output;
+  EXPECT_EQ(ParseResponse(analyze_next.output)
+                .analyze()
+                .response()
+                .resume_byte_position(),
+            18);
+}
+
+TEST(FrontendTest, OmitsExtendedParsePayloadForEveryRoot) {
+  Frontend frontend;
+  ProcessResult expression = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"parse":{"extendedRequest":{"sql":"1 + 2","root":"EXPRESSION"}}})",
+      1);
+  ASSERT_TRUE(expression.ok) << expression.output;
+  FrontendResponse expression_response = ParseResponse(expression.output);
+  EXPECT_FALSE(expression_response.parse().has_extended_response());
+  EXPECT_NE(expression_response.parse().debug_string().find("BinaryExpression"),
+            std::string::npos);
+  EXPECT_EQ(expression.output.find("parsedExpression"), std::string::npos)
+      << expression.output;
+
+  ProcessResult type = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"parse":{"extendedRequest":{"sql":"ARRAY<STRUCT<x INT64>>","root":"TYPE"}}})",
+      2);
+  ASSERT_TRUE(type.ok) << type.output;
+  FrontendResponse type_response = ParseResponse(type.output);
+  EXPECT_FALSE(type_response.parse().has_extended_response());
+  EXPECT_NE(type_response.parse().debug_string().find("ArrayType"),
+            std::string::npos);
+  EXPECT_EQ(type.output.find("parsedType"), std::string::npos) << type.output;
+
+  ProcessResult multiple = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"parse":{"extendedRequest":{"sql":"SELECT 1; SELECT 2;","root":"PARSE_MULTIPLE"}}})",
+      3);
+  ASSERT_TRUE(multiple.ok) << multiple.output;
+  FrontendResponse multiple_response = ParseResponse(multiple.output);
+  EXPECT_FALSE(multiple_response.parse().has_extended_response());
+  EXPECT_EQ(multiple.output.find("parsedStatement"), std::string::npos)
+      << multiple.output;
+  // Both statements are still rendered, so the dump comparison is unaffected.
+  const std::string& debug = multiple_response.parse().debug_string();
+  const size_t first = debug.find("QueryStatement");
+  ASSERT_NE(first, std::string::npos);
+  EXPECT_NE(debug.find("QueryStatement", first + 1), std::string::npos);
+}
+
+TEST(FrontendTest, RejectsOmitResponseProtoWhereItWouldEmptyTheReply) {
+  Frontend frontend;
+  ProcessResult builtin = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"bf","responseOptions":{"omitResponseProto":true},"builtinFunctions":{"request":{}}})",
+      1);
+  ASSERT_FALSE(builtin.ok);
+  FrontendResponse builtin_response = ParseResponse(builtin.output);
+  EXPECT_EQ(builtin_response.id(), "bf");
+  EXPECT_EQ(builtin_response.error().origin(), "protocol");
+  EXPECT_EQ(builtin_response.error().operation(), "builtinFunctions");
+  EXPECT_EQ(builtin_response.error().message(),
+            "responseOptions.omitResponseProto would leave the "
+            "builtinFunctions reply empty; it applies to analyze and parse "
+            "only");
+
+  // The two option-reading operations answer with nothing but their response
+  // proto either, so they read the same way.
+  ProcessResult language = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"languageOptions":{}})",
+      2);
+  ASSERT_FALSE(language.ok);
+  EXPECT_EQ(ParseResponse(language.output).error().message(),
+            "responseOptions.omitResponseProto would leave the languageOptions "
+            "reply empty; it applies to analyze and parse only");
+
+  ProcessResult analyzer = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":true},"analyzerOptions":{"request":{}}})",
+      3);
+  ASSERT_FALSE(analyzer.ok);
+  EXPECT_EQ(ParseResponse(analyzer.output).error().message(),
+            "responseOptions.omitResponseProto would leave the analyzerOptions "
+            "reply empty; it applies to analyze and parse only");
+
+  // An explicit false, and an empty responseOptions, are accepted everywhere.
+  ProcessResult kept = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{"omitResponseProto":false},"builtinFunctions":{"request":{}}})",
+      4);
+  ASSERT_TRUE(kept.ok) << kept.output;
+  EXPECT_GT(
+      ParseResponse(kept.output).builtin_functions().response().function_size(),
+      0);
+
+  ProcessResult empty_options = frontend.ProcessLine(
+      R"({"protocolVersion":1,"responseOptions":{},"analyzerOptions":{}})", 5);
+  ASSERT_TRUE(empty_options.ok) << empty_options.output;
+}
+
+TEST(FrontendTest, OmitResponseProtoLeavesErrorsUnchanged) {
+  Frontend frontend;
+  ProcessResult full = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"e1","analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"SELECT nosuchcolumn"}}})",
+      9);
+  ASSERT_FALSE(full.ok);
+  ProcessResult omitted = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"e1","responseOptions":{"omitResponseProto":true},"analyze":{"namedCatalog":"CATALOG_NONE","request":{"sqlStatement":"SELECT nosuchcolumn"}}})",
+      9);
+  ASSERT_FALSE(omitted.ok);
+  EXPECT_EQ(omitted.output, full.output);
+  EXPECT_TRUE(ParseResponse(omitted.output).error().has_location());
 }
 
 TEST(FrontendTest, ReportsInputLineLocalErrors) {
@@ -414,6 +1007,69 @@ TEST(FrontendTest, RejectsUnknownFieldsAndVersions) {
               R"({"protocolVersion":2,"parse":{"request":{"sqlStatement":"SELECT 1"}}})",
               2)
           .ok);
+}
+
+TEST(FrontendTest, NamesMissingRequiredProtocolFields) {
+  Frontend frontend;
+  ProcessResult no_version = frontend.ProcessLine(
+      R"({"parse":{"request":{"sqlStatement":"SELECT 1"}}})", 1);
+  ASSERT_FALSE(no_version.ok);
+  FrontendResponse no_version_response = ParseResponse(no_version.output);
+  EXPECT_EQ(no_version_response.error().origin(), "protocol");
+  EXPECT_EQ(no_version_response.error().message(),
+            "protocolVersion is required");
+
+  // Every other required field reads the same way, in the lower camel case
+  // spelling the JSON protocol uses rather than the protobuf field name.
+  ProcessResult no_root = frontend.ProcessLine(
+      R"({"protocolVersion":1,"parse":{"extendedRequest":{"sql":"1"}}})", 2);
+  ASSERT_FALSE(no_root.ok);
+  EXPECT_EQ(ParseResponse(no_root.output).error().message(),
+            "parse.extendedRequest.root is required");
+
+  ProcessResult several =
+      frontend.ProcessLine(R"({"parse":{"extendedRequest":{"sql":"1"}}})", 3);
+  ASSERT_FALSE(several.ok);
+  EXPECT_EQ(ParseResponse(several.output).error().message(),
+            "protocolVersion and parse.extendedRequest.root are required");
+}
+
+TEST(FrontendTest, RejectsSeveralOperationsAtTheProtocolLayer) {
+  Frontend frontend;
+  ProcessResult two = frontend.ProcessLine(
+      R"({"protocolVersion":1,"id":"two-ops","parse":{"request":{"sqlStatement":"SELECT 1"}},"analyze":{"request":{"sqlStatement":"SELECT 1"}}})",
+      1);
+  ASSERT_FALSE(two.ok);
+  FrontendResponse two_response = ParseResponse(two.output);
+  EXPECT_EQ(two_response.id(), "two-ops");
+  EXPECT_EQ(two_response.error().origin(), "protocol");
+  EXPECT_EQ(two_response.error().message(),
+            "exactly one operation is allowed; found analyze and parse");
+  EXPECT_FALSE(two_response.error().has_operation());
+
+  ProcessResult three = frontend.ProcessLine(
+      R"({"protocolVersion":1,"builtinFunctions":{"request":{}},"parse":{"request":{"sqlStatement":"SELECT 1"}},"analyze":{"request":{"sqlStatement":"SELECT 1"}}})",
+      2);
+  ASSERT_FALSE(three.ok);
+  EXPECT_EQ(ParseResponse(three.output).error().message(),
+            "exactly one operation is allowed; found analyze, parse and "
+            "builtinFunctions");
+
+  // Zero operations keeps reporting the neighbouring protocol message.
+  ProcessResult none = frontend.ProcessLine(R"({"protocolVersion":1})", 3);
+  ASSERT_FALSE(none.ok);
+  FrontendResponse none_response = ParseResponse(none.output);
+  EXPECT_EQ(none_response.error().origin(), "protocol");
+  EXPECT_EQ(none_response.error().message(), "operation is required");
+}
+
+TEST(FrontendTest, TreatsWhitespaceOnlyInputLinesAsBlank) {
+  EXPECT_TRUE(IsBlankInputLine(""));
+  EXPECT_TRUE(IsBlankInputLine("   "));
+  EXPECT_TRUE(IsBlankInputLine("\t \r"));
+  EXPECT_FALSE(IsBlankInputLine("{}"));
+  EXPECT_FALSE(IsBlankInputLine(
+      R"( {"protocolVersion":1,"parse":{"request":{"sqlStatement":"SELECT 1"}}} )"));
 }
 
 TEST(FrontendTest, EchoesValidIdOnProtoJsonErrors) {

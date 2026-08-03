@@ -16,6 +16,9 @@
       "minLength": 1,
       "maxLength": 256
     },
+    "responseOptions": {
+      "$ref": "#/$defs/responseOptions"
+    },
     "analyze": {
       "$ref": "#/$defs/analyzeOperation"
     },
@@ -24,6 +27,12 @@
     },
     "builtinFunctions": {
       "$ref": "#/$defs/builtinFunctionsOperation"
+    },
+    "languageOptions": {
+      "$ref": "#/$defs/languageOptionsOperation"
+    },
+    "analyzerOptions": {
+      "$ref": "#/$defs/analyzerOptionsOperation"
     }
   },
   "additionalProperties": false,
@@ -42,9 +51,30 @@
       "required": [
         "builtinFunctions"
       ]
+    },
+    {
+      "required": [
+        "languageOptions"
+      ]
+    },
+    {
+      "required": [
+        "analyzerOptions"
+      ]
     }
   ],
   "$defs": {
+    "responseOptions": {
+      "type": "object",
+      "description": "Selects how much of a successful reply is sent back. It applies to whichever operation the request carries.",
+      "properties": {
+        "omitResponseProto": {
+          "type": "boolean",
+          "description": "Drops the serialized AST from an analyze or parse reply, keeping debugString and any resumeBytePosition. The other operations reply with nothing but their response proto and reject it."
+        }
+      },
+      "additionalProperties": false
+    },
     "protoObject": {
       "type": "object",
       "description": "An evolving nested ProtoJSON message. The protobuf decoder performs field-level validation."
@@ -180,6 +210,40 @@
       },
       "additionalProperties": false
     },
+    "languageVersion": {
+      "description": "A googlesql.LanguageVersion ProtoJSON enum name, or its accepted numeric representation.",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        }
+      ]
+    },
+    "languageOptionsPreset": {
+      "type": "object",
+      "description": "A named starting point for the language options, merged under the request's own languageOptions.",
+      "properties": {
+        "features": {
+          "enum": [
+            "LANGUAGE_FEATURES_DEFAULT",
+            "LANGUAGE_FEATURES_MAXIMUM",
+            "LANGUAGE_FEATURES_DEVELOPMENT"
+          ]
+        },
+        "languageVersion": {
+          "$ref": "#/$defs/languageVersion"
+        },
+        "allReservableKeywordsReserved": {
+          "type": "boolean"
+        },
+        "allStatementKindsSupported": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "functionSignatureId": {
       "description": "A ProtoJSON enum name or its accepted numeric representation.",
       "oneOf": [
@@ -244,6 +308,9 @@
             "CATALOG_NONE",
             "CATALOG_SAMPLE"
           ]
+        },
+        "languageOptionsPreset": {
+          "$ref": "#/$defs/languageOptionsPreset"
         }
       },
       "additionalProperties": false,
@@ -289,6 +356,9 @@
         },
         "renderOptions": {
           "$ref": "#/$defs/renderOptions"
+        },
+        "languageOptionsPreset": {
+          "$ref": "#/$defs/languageOptionsPreset"
         }
       },
       "additionalProperties": false,
@@ -313,6 +383,42 @@
       "properties": {
         "request": {
           "$ref": "#/$defs/builtinFunctionsRequest"
+        }
+      },
+      "additionalProperties": false
+    },
+    "languageOptionsRequest": {
+      "type": "object",
+      "properties": {
+        "maximumFeatures": {
+          "type": "boolean"
+        },
+        "languageVersion": {
+          "$ref": "#/$defs/languageVersion"
+        }
+      },
+      "additionalProperties": false
+    },
+    "analyzerOptionsRequest": {
+      "type": "object",
+      "description": "googlesql.local_service.AnalyzerOptionsRequest carries no fields.",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "languageOptionsOperation": {
+      "type": "object",
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/languageOptionsRequest"
+        }
+      },
+      "additionalProperties": false
+    },
+    "analyzerOptionsOperation": {
+      "type": "object",
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/analyzerOptionsRequest"
         }
       },
       "additionalProperties": false

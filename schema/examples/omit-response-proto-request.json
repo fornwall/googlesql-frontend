@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "id": "omit-1",
+  "responseOptions": {
+    "omitResponseProto": true
+  },
+  "parse": {
+    "request": {
+      "sqlStatement": "SELECT 1"
+    }
+  }
+}

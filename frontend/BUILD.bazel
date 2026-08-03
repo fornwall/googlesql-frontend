@@ -12,6 +12,7 @@ proto_library(
         "@googlesql//googlesql/local_service:local_service_proto",
         "@googlesql//googlesql/parser:parse_tree_proto",
         "@googlesql//googlesql/proto:options_proto",
+        "@googlesql//googlesql/public:options_proto",
     ],
 )
 

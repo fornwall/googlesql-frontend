@@ -16,6 +16,7 @@
 #include "absl/flags/flag.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "frontend/protocol.pb.h"
@@ -26,6 +27,7 @@
 #include "googlesql/common/proto_helper.h"
 #include "googlesql/parser/parse_tree_serializer.h"
 #include "googlesql/parser/parser.h"
+#include "googlesql/proto/options.pb.h"
 #include "googlesql/public/analyzer.h"
 #include "googlesql/public/analyzer_options.h"
 #include "googlesql/public/analyzer_output.h"
@@ -386,6 +388,140 @@ absl::StatusOr<DescriptorPools> BuildDescriptorPools(
   return pools;
 }
 
+// AnalyzerOptions::Deserialize begins from a default-constructed
+// AnalyzerOptions but then assigns these scalar fields unconditionally, so an
+// options object that omits one silently receives the protobuf zero value
+// instead of the value GoogleSQL documents as the default. Restore the
+// default-constructed value for every such field the request did not set, and
+// read those defaults from a default-constructed AnalyzerOptions so they track
+// GoogleSQL rather than a private copy of its literals.
+//
+// Repeated fields are left exactly as upstream deserializes them: proto
+// absence and an explicit empty list are indistinguishable, so enabled_rewrites
+// keeps its deserialized meaning.
+absl::Status DeserializeAnalyzerOptions(
+    const googlesql::AnalyzerOptionsProto& proto,
+    const std::vector<const google::protobuf::DescriptorPool*>& pools,
+    googlesql::TypeFactory* type_factory, googlesql::AnalyzerOptions* options) {
+  absl::Status status = googlesql::AnalyzerOptions::Deserialize(
+      proto, pools, type_factory, options);
+  if (!status.ok()) {
+    return status;
+  }
+  const googlesql::AnalyzerOptions defaults;
+  if (!proto.has_statement_context()) {
+    options->set_statement_context(defaults.statement_context());
+  }
+  if (!proto.has_error_message_mode()) {
+    options->set_error_message_mode(defaults.error_message_mode());
+  }
+  if (!proto.has_create_new_column_for_each_projected_output()) {
+    options->set_create_new_column_for_each_projected_output(
+        defaults.create_new_column_for_each_projected_output());
+  }
+  if (!proto.has_prune_unused_columns()) {
+    options->set_prune_unused_columns(defaults.prune_unused_columns());
+  }
+  if (!proto.has_allow_undeclared_parameters()) {
+    options->set_allow_undeclared_parameters(
+        defaults.allow_undeclared_parameters());
+  }
+  if (!proto.has_parameter_mode()) {
+    options->set_parameter_mode(defaults.parameter_mode());
+  }
+  if (!proto.has_preserve_column_aliases()) {
+    options->set_preserve_column_aliases(defaults.preserve_column_aliases());
+  }
+  if (!proto.has_preserve_unnecessary_cast()) {
+    options->set_preserve_unnecessary_cast(
+        defaults.preserve_unnecessary_cast());
+  }
+  if (!proto.has_replace_table_not_found_error_with_tvf_error_if_applicable()) {
+    options->set_replace_table_not_found_error_with_tvf_error_if_applicable(
+        defaults.replace_table_not_found_error_with_tvf_error_if_applicable());
+  }
+  return absl::OkStatus();
+}
+
+// Expands a preset into a LanguageOptionsProto and merges the request's own
+// language options on top of it. LanguageOptions::Serialize writes every field,
+// so the expansion is complete before the merge: scalars the request sets
+// replace the preset's, and repeated entries the request lists are added to the
+// preset's. The result is "preset plus explicit additions" rather than either
+// one alone.
+void ApplyLanguageOptionsPreset(const LanguageOptionsPreset& preset,
+                                googlesql::LanguageOptionsProto* options) {
+  googlesql::LanguageOptions expanded;
+  // SetLanguageVersion replaces the enabled feature set rather than adding to
+  // it, so it runs first: when a feature set is named as well, that set is the
+  // one that survives.
+  if (preset.has_language_version()) {
+    expanded.SetLanguageVersion(preset.language_version());
+  }
+  switch (preset.features()) {
+    case LANGUAGE_FEATURES_DEFAULT:
+      break;
+    case LANGUAGE_FEATURES_MAXIMUM:
+      expanded.EnableMaximumLanguageFeatures();
+      break;
+    case LANGUAGE_FEATURES_DEVELOPMENT:
+      expanded.EnableMaximumLanguageFeaturesForDevelopment();
+      break;
+  }
+  if (preset.all_reservable_keywords_reserved()) {
+    expanded.EnableAllReservableKeywords();
+  }
+  if (preset.all_statement_kinds_supported()) {
+    expanded.SetSupportsAllStatementKinds();
+  }
+
+  googlesql::LanguageOptionsProto merged;
+  expanded.Serialize(&merged);
+  merged.MergeFrom(*options);
+  options->Swap(&merged);
+}
+
+// Builds the AnalyzeRequest the frontend actually runs. An explicit preset
+// always applies. Otherwise a named catalog with no language options at all
+// keeps its documented baseline of maximum released features, all statement
+// kinds, and all reservable keywords.
+googlesql::local_service::AnalyzeRequest EffectiveAnalyzeRequest(
+    const AnalyzeOperation& operation) {
+  googlesql::local_service::AnalyzeRequest request = operation.request();
+  if (operation.has_language_options_preset()) {
+    ApplyLanguageOptionsPreset(
+        operation.language_options_preset(),
+        request.mutable_options()->mutable_language_options());
+  } else if (operation.has_named_catalog() &&
+             !request.options().has_language_options()) {
+    googlesql::LanguageOptions language_options;
+    language_options.EnableMaximumLanguageFeatures();
+    language_options.SetSupportsAllStatementKinds();
+    language_options.EnableAllReservableKeywords();
+    language_options.Serialize(
+        request.mutable_options()->mutable_language_options());
+  }
+  return request;
+}
+
+// Builds the ParseOperation the frontend actually runs. The preset applies to
+// whichever input the operation carries.
+ParseOperation EffectiveParseOperation(const ParseOperation& operation) {
+  ParseOperation effective = operation;
+  if (!effective.has_language_options_preset()) {
+    return effective;
+  }
+  if (effective.has_request()) {
+    ApplyLanguageOptionsPreset(effective.language_options_preset(),
+                               effective.mutable_request()->mutable_options());
+  } else if (effective.has_extended_request()) {
+    ApplyLanguageOptionsPreset(
+        effective.language_options_preset(),
+        effective.mutable_extended_request()->mutable_options());
+  }
+  return effective;
+}
+
 absl::Status AnalyzeWithCatalog(
     googlesql::local_service::GoogleSqlLocalServiceImpl* service,
     const googlesql::local_service::AnalyzeRequest& request,
@@ -393,14 +529,16 @@ absl::Status AnalyzeWithCatalog(
     googlesql::SimpleCatalog* catalog, AnalyzeResult* result) {
   googlesql::TypeFactory type_factory;
   googlesql::AnalyzerOptions options;
-  absl::Status status = googlesql::AnalyzerOptions::Deserialize(
-      request.options(), pools, &type_factory, &options);
+  absl::Status status = DeserializeAnalyzerOptions(request.options(), pools,
+                                                   &type_factory, &options);
   if (!status.ok()) {
     return status;
   }
   // Locations are a typed protocol field. Keep the default prose message free
   // of rendered coordinates, while preserving an explicit display-oriented
-  // error mode and attaching the typed payload independently.
+  // error mode and attaching the typed payload independently. This frontend
+  // policy deliberately overrides the restored AnalyzerOptions default for an
+  // absent error message mode.
   if (!request.options().has_error_message_mode()) {
     options.set_error_message_mode(googlesql::ERROR_MESSAGE_WITH_PAYLOAD);
   }
@@ -627,18 +765,9 @@ absl::Status ParseExtended(const ExtendedParseRequest& request,
 
 absl::Status AnalyzeNamedCatalog(
     googlesql::local_service::GoogleSqlLocalServiceImpl* service,
-    const AnalyzeOperation& operation, AnalyzeResult* result) {
-  googlesql::local_service::AnalyzeRequest effective_request =
-      operation.request();
-  if (!effective_request.options().has_language_options()) {
-    googlesql::LanguageOptions language_options;
-    language_options.EnableMaximumLanguageFeatures();
-    language_options.SetSupportsAllStatementKinds();
-    language_options.EnableAllReservableKeywords();
-    language_options.Serialize(
-        effective_request.mutable_options()->mutable_language_options());
-  }
-  const googlesql::local_service::AnalyzeRequest& request = effective_request;
+    NamedCatalog named_catalog,
+    const googlesql::local_service::AnalyzeRequest& request,
+    AnalyzeResult* result) {
   absl::StatusOr<DescriptorPools> pools =
       BuildDescriptorPools(request.descriptor_pool_list());
   if (!pools.ok()) {
@@ -650,9 +779,9 @@ absl::Status AnalyzeNamedCatalog(
   // loaders that assume a valid analyzer configuration.
   googlesql::TypeFactory options_type_factory;
   googlesql::AnalyzerOptions analyzer_options;
-  absl::Status options_status = googlesql::AnalyzerOptions::Deserialize(
-      request.options(), pools->ordered, &options_type_factory,
-      &analyzer_options);
+  absl::Status options_status =
+      DeserializeAnalyzerOptions(request.options(), pools->ordered,
+                                 &options_type_factory, &analyzer_options);
   if (!options_status.ok()) {
     return options_status;
   }
@@ -678,7 +807,7 @@ absl::Status AnalyzeNamedCatalog(
                               result);
   };
 
-  switch (operation.named_catalog()) {
+  switch (named_catalog) {
     case CATALOG_NONE: {
       googlesql::SimpleCatalog catalog("simple_catalog");
       absl::Status status = catalog.AddBuiltinFunctionsAndTypes(
@@ -727,28 +856,123 @@ absl::Status ValidateId(const FrontendRequest& request) {
   return absl::OkStatus();
 }
 
-std::optional<FrontendRequest> ParseErrorEnvelope(absl::string_view input) {
+// Joins names into a sentence fragment: "a", "a and b", or "a, b and c".
+std::string JoinNames(const std::vector<std::string>& names) {
+  std::string joined;
+  for (size_t index = 0; index < names.size(); ++index) {
+    if (index > 0) {
+      joined.append(index + 1 == names.size() ? " and " : ", ");
+    }
+    joined.append(names[index]);
+  }
+  return joined;
+}
+
+// Rewrites a protobuf field path such as "parse.extended_request.root" into
+// the lower camel case spelling the JSON protocol uses.
+std::string LowerCamelFieldPath(absl::string_view path) {
+  std::string camel;
+  camel.reserve(path.size());
+  bool capitalize = false;
+  for (const char c : path) {
+    if (c == '_') {
+      capitalize = true;
+      continue;
+    }
+    camel.push_back(capitalize ? absl::ascii_toupper(c) : c);
+    capitalize = false;
+  }
+  return camel;
+}
+
+// Reports the required protocol fields the request left unset as a sentence,
+// using the public JSON names: "protocolVersion is required".
+absl::Status MissingRequiredFieldsError(const FrontendRequest& request) {
+  std::vector<std::string> paths;
+  request.FindInitializationErrors(&paths);
+  if (paths.empty()) {
+    return absl::InvalidArgumentError(request.InitializationErrorString());
+  }
+  for (std::string& path : paths) {
+    path = LowerCamelFieldPath(path);
+  }
+  return absl::InvalidArgumentError(absl::StrCat(
+      JoinNames(paths), paths.size() == 1 ? " is required" : " are required"));
+}
+
+// What a rejected input line still says about itself: a usable id to echo, and
+// which operation members the JSON object carries. Both are read from the
+// generic JSON object because the request itself failed to decode.
+struct ErrorEnvelope {
+  std::optional<FrontendRequest> request;
+  std::vector<std::string> operations;
+};
+
+ErrorEnvelope ParseErrorEnvelope(absl::string_view input) {
+  ErrorEnvelope envelope;
   if (JsonDuplicateMemberScanner(input).Scan() !=
       JsonScanResult::kNoDuplicate) {
-    return std::nullopt;
+    return envelope;
   }
 
   google::protobuf::Struct object;
   if (!google::protobuf::util::JsonStringToMessage(input, &object).ok()) {
-    return std::nullopt;
+    return envelope;
   }
+
+  const google::protobuf::OneofDescriptor* operation =
+      FrontendRequest::descriptor()->FindOneofByName("operation");
+  for (int index = 0; index < operation->field_count(); ++index) {
+    const google::protobuf::FieldDescriptor* field = operation->field(index);
+    if (object.fields().contains(field->json_name()) ||
+        object.fields().contains(field->name())) {
+      envelope.operations.emplace_back(field->json_name());
+    }
+  }
+
   const auto id = object.fields().find("id");
   if (id == object.fields().end() ||
       id->second.kind_case() != google::protobuf::Value::kStringValue) {
-    return std::nullopt;
+    return envelope;
   }
-
-  FrontendRequest envelope;
-  envelope.set_id(id->second.string_value());
-  if (!ValidateId(envelope).ok()) {
-    return std::nullopt;
+  FrontendRequest identified;
+  identified.set_id(id->second.string_value());
+  if (ValidateId(identified).ok()) {
+    envelope.request = std::move(identified);
   }
   return envelope;
+}
+
+std::string OperationName(const FrontendRequest& request) {
+  switch (request.operation_case()) {
+    case FrontendRequest::kAnalyze:
+      return "analyze";
+    case FrontendRequest::kParse:
+      return "parse";
+    case FrontendRequest::kBuiltinFunctions:
+      return "builtinFunctions";
+    case FrontendRequest::kLanguageOptions:
+      return "languageOptions";
+    case FrontendRequest::kAnalyzerOptions:
+      return "analyzerOptions";
+    case FrontendRequest::OPERATION_NOT_SET:
+      return "";
+  }
+  return "";
+}
+
+// Only analyze and parse carry a payload separable from the rest of their
+// reply. The option-reading operations answer with their response proto and
+// nothing else, so omitting it would leave an empty result rather than a
+// cheaper one.
+absl::Status ValidateResponseOptions(const FrontendRequest& request) {
+  if (!request.response_options().omit_response_proto()) {
+    return absl::OkStatus();
+  }
+  return absl::InvalidArgumentError(
+      absl::StrCat("responseOptions.omitResponseProto would leave the ",
+                   OperationName(request),
+                   " reply empty; it applies to analyze and parse only"));
 }
 
 absl::Status ValidateRequest(const FrontendRequest& request) {
@@ -785,25 +1009,13 @@ absl::Status ValidateRequest(const FrontendRequest& request) {
       return absl::OkStatus();
     }
     case FrontendRequest::kBuiltinFunctions:
-      return absl::OkStatus();
+    case FrontendRequest::kLanguageOptions:
+    case FrontendRequest::kAnalyzerOptions:
+      return ValidateResponseOptions(request);
     case FrontendRequest::OPERATION_NOT_SET:
       return absl::InvalidArgumentError("operation is required");
   }
   return absl::InvalidArgumentError("unknown operation");
-}
-
-std::string OperationName(const FrontendRequest& request) {
-  switch (request.operation_case()) {
-    case FrontendRequest::kAnalyze:
-      return "analyze";
-    case FrontendRequest::kParse:
-      return "parse";
-    case FrontendRequest::kBuiltinFunctions:
-      return "builtinFunctions";
-    case FrontendRequest::OPERATION_NOT_SET:
-      return "";
-  }
-  return "";
 }
 
 struct SqlInput {
@@ -848,6 +1060,8 @@ std::optional<SqlInput> ErrorSqlInput(const FrontendRequest& request) {
       return std::nullopt;
     }
     case FrontendRequest::kBuiltinFunctions:
+    case FrontendRequest::kLanguageOptions:
+    case FrontendRequest::kAnalyzerOptions:
     case FrontendRequest::OPERATION_NOT_SET:
       return std::nullopt;
   }
@@ -917,6 +1131,39 @@ FrontendResponse ErrorResponse(const absl::Status& status,
   return response;
 }
 
+// Applies responseOptions.omitResponseProto to a successful reply: the
+// serialized AST goes away, and everything else the reply carries stays. The
+// analysis and the parse themselves are unchanged, so debugString and any
+// error are exactly what the full reply would have contained.
+//
+// resume_byte_position lives in the same upstream message as the payload but
+// outside its result oneof, so clearing the oneof preserves it. A response
+// message left with no field at all is dropped rather than sent as an empty
+// object, which keeps every response member meaningful.
+void OmitResponseProto(FrontendResponse* response) {
+  if (response->has_analyze()) {
+    AnalyzeResult* analyze = response->mutable_analyze();
+    analyze->mutable_response()->clear_result();
+    if (!analyze->response().has_resume_byte_position()) {
+      analyze->clear_response();
+    }
+    return;
+  }
+  if (!response->has_parse()) {
+    return;
+  }
+  ParseResult* parse = response->mutable_parse();
+  if (!parse->has_response()) {
+    // The extended roots have no resume position to preserve.
+    parse->clear_extended_response();
+    return;
+  }
+  parse->mutable_response()->clear_result();
+  if (!parse->response().has_resume_byte_position()) {
+    parse->clear_response();
+  }
+}
+
 ProcessResult Render(FrontendResponse response, bool ok) {
   absl::StatusOr<std::string> output = PrintJson(response);
   if (output.ok()) {
@@ -944,10 +1191,24 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
   FrontendRequest request;
   absl::Status parse_status = ParseJson(input, &request);
   if (!parse_status.ok()) {
-    std::optional<FrontendRequest> envelope = ParseErrorEnvelope(input);
-    return Render(ErrorResponse(parse_status, "proto_json", line_number, "",
-                                envelope.has_value() ? &*envelope : nullptr),
-                  false);
+    ErrorEnvelope envelope = ParseErrorEnvelope(input);
+    const FrontendRequest* identified =
+        envelope.request.has_value() ? &*envelope.request : nullptr;
+    // Exactly one operation per request is a protocol rule, like the
+    // "operation is required" rejection of zero operations. Report it here
+    // rather than letting the ProtoJSON decoder complain about a repeated
+    // oneof member and leak an internal message name.
+    if (envelope.operations.size() > 1) {
+      const absl::Status conflict = absl::InvalidArgumentError(
+          absl::StrCat("exactly one operation is allowed; found ",
+                       JoinNames(envelope.operations)));
+      return Render(
+          ErrorResponse(conflict, "protocol", line_number, "", identified),
+          false);
+    }
+    return Render(
+        ErrorResponse(parse_status, "proto_json", line_number, "", identified),
+        false);
   }
   absl::Status id_status = ValidateId(request);
   if (!id_status.ok()) {
@@ -956,9 +1217,8 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
                   false);
   }
   if (!request.IsInitialized()) {
-    return Render(ErrorResponse(absl::InvalidArgumentError(
-                                    request.InitializationErrorString()),
-                                "protocol", line_number, "", &request),
+    return Render(ErrorResponse(MissingRequiredFieldsError(request), "protocol",
+                                line_number, "", &request),
                   false);
   }
   if (request.protocol_version() != kProtocolVersion) {
@@ -987,11 +1247,14 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
   switch (request.operation_case()) {
     case FrontendRequest::kAnalyze: {
       AnalyzeResult* result = response.mutable_analyze();
+      const googlesql::local_service::AnalyzeRequest analyze_request =
+          EffectiveAnalyzeRequest(request.analyze());
       if (request.analyze().has_named_catalog()) {
-        status = AnalyzeNamedCatalog(&service_, request.analyze(), result);
+        status =
+            AnalyzeNamedCatalog(&service_, request.analyze().named_catalog(),
+                                analyze_request, result);
       } else {
-        status = AnalyzeInlineCatalog(&service_, request.analyze().request(),
-                                      result);
+        status = AnalyzeInlineCatalog(&service_, analyze_request, result);
       }
       break;
     }
@@ -1006,16 +1269,17 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
           request.parse().has_render_options() &&
               request.parse().render_options().output_asc_explicitly());
 
+      const ParseOperation parse = EffectiveParseOperation(request.parse());
       ParseResult* result = response.mutable_parse();
-      if (request.parse().has_request()) {
+      if (parse.has_request()) {
         googlesql::local_service::ParseResponse local_response;
-        status = service_.Parse(request.parse().request(), &local_response);
+        status = service_.Parse(parse.request(), &local_response);
         if (!status.ok()) {
-          status = RecoverScriptParseError(request.parse().request(), status);
+          status = RecoverScriptParseError(parse.request(), status);
           break;
         }
         absl::StatusOr<std::string> debug =
-            NativeParseDebugString(request.parse().request());
+            NativeParseDebugString(parse.request());
         if (!debug.ok()) {
           status = debug.status();
           break;
@@ -1025,7 +1289,7 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
       } else {
         std::string debug_string;
         status =
-            ParseExtended(request.parse().extended_request(),
+            ParseExtended(parse.extended_request(),
                           result->mutable_extended_response(), &debug_string);
         if (status.ok()) {
           result->set_debug_string(std::move(debug_string));
@@ -1038,9 +1302,28 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
       status = service_.GetBuiltinFunctions(
           request.builtin_functions().request(), &local_response);
       if (status.ok()) {
-        BuiltinFunctionsResult* result = response.mutable_builtin_functions();
-        result->mutable_response()->Swap(&local_response);
-        result->set_debug_string("");
+        response.mutable_builtin_functions()->mutable_response()->Swap(
+            &local_response);
+      }
+      break;
+    }
+    case FrontendRequest::kLanguageOptions: {
+      googlesql::LanguageOptionsProto local_response;
+      status = service_.GetLanguageOptions(request.language_options().request(),
+                                           &local_response);
+      if (status.ok()) {
+        response.mutable_language_options()->mutable_response()->Swap(
+            &local_response);
+      }
+      break;
+    }
+    case FrontendRequest::kAnalyzerOptions: {
+      googlesql::AnalyzerOptionsProto local_response;
+      status = service_.GetAnalyzerOptions(request.analyzer_options().request(),
+                                           &local_response);
+      if (status.ok()) {
+        response.mutable_analyzer_options()->mutable_response()->Swap(
+            &local_response);
       }
       break;
     }
@@ -1054,7 +1337,14 @@ ProcessResult Frontend::ProcessLine(absl::string_view input, int line_number) {
                                 OperationName(request), &request),
                   false);
   }
+  if (request.response_options().omit_response_proto()) {
+    OmitResponseProto(&response);
+  }
   return Render(std::move(response), true);
+}
+
+bool IsBlankInputLine(absl::string_view input) {
+  return absl::StripAsciiWhitespace(input).empty();
 }
 
 std::string VersionString() {

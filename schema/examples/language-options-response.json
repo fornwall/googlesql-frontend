@@ -1,0 +1,21 @@
+{
+  "protocolVersion": 1,
+  "id": "language-options-1",
+  "languageOptions": {
+    "response": {
+      "nameResolutionMode": "NAME_RESOLUTION_DEFAULT",
+      "productMode": "PRODUCT_INTERNAL",
+      "errorOnDeprecatedSyntax": false,
+      "supportedStatementKinds": [
+        "RESOLVED_QUERY_STMT"
+      ],
+      "enabledLanguageFeatures": [
+        "FEATURE_ANALYTIC_FUNCTIONS",
+        "FEATURE_NUMERIC_TYPE"
+      ],
+      "reservedKeywords": [
+        "QUALIFY"
+      ]
+    }
+  }
+}

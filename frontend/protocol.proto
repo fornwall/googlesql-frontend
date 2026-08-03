@@ -5,15 +5,40 @@ package googlesql_frontend;
 import "googlesql/local_service/local_service.proto";
 import "googlesql/parser/parse_tree.proto";
 import "googlesql/proto/options.proto";
+import "googlesql/public/options.proto";
 
 enum NamedCatalog {
   CATALOG_NONE = 0;
   CATALOG_SAMPLE = 1;
 }
 
+// Named GoogleSQL language feature sets. LanguageOptionsProto can express only
+// the expanded result of the corresponding LanguageOptions calls, so the names
+// live here instead.
+enum LanguageFeatureSet {
+  // LanguageOptions' own defaults: no optional feature is enabled.
+  LANGUAGE_FEATURES_DEFAULT = 0;
+  // Every released feature GoogleSQL would ideally enable.
+  LANGUAGE_FEATURES_MAXIMUM = 1;
+  // The maximum set plus features still under development. Their behaviour is
+  // unstable by definition and can change between GoogleSQL commits.
+  LANGUAGE_FEATURES_DEVELOPMENT = 2;
+}
+
+// A named starting point for LanguageOptions, applied before the request's own
+// LanguageOptionsProto is merged on top of it.
+message LanguageOptionsPreset {
+  optional LanguageFeatureSet features = 1
+      [default = LANGUAGE_FEATURES_DEFAULT];
+  optional googlesql.LanguageVersion language_version = 2;
+  optional bool all_reservable_keywords_reserved = 3 [default = false];
+  optional bool all_statement_kinds_supported = 4 [default = false];
+}
+
 message AnalyzeOperation {
   required googlesql.local_service.AnalyzeRequest request = 1;
   optional NamedCatalog named_catalog = 2;
+  optional LanguageOptionsPreset language_options_preset = 3;
 }
 
 enum ExtendedParseRoot {
@@ -38,25 +63,59 @@ message ParseOperation {
     ExtendedParseRequest extended_request = 2;
   }
   optional RenderOptions render_options = 3;
+  // Applies to whichever input the operation carries.
+  optional LanguageOptionsPreset language_options_preset = 4;
 }
 
 message BuiltinFunctionsOperation {
   required googlesql.GoogleSQLBuiltinFunctionOptionsProto request = 1;
 }
 
+// Reads the language options this build of GoogleSQL produces, so a client can
+// record the tool's own vintage instead of deriving it from a source checkout.
+message LanguageOptionsOperation {
+  optional googlesql.local_service.LanguageOptionsRequest request = 1;
+}
+
+// Reads the analyzer-option defaults of this build of GoogleSQL. These are the
+// defaults the frontend restores for options the request leaves unset.
+message AnalyzerOptionsOperation {
+  optional googlesql.local_service.AnalyzerOptionsRequest request = 1;
+}
+
+// Selects how much of a successful reply is sent back. The default is the
+// complete reply, so an absent ResponseOptions never changes an answer.
+message ResponseOptions {
+  // Drops the serialized AST from the reply and keeps everything else,
+  // including debug_string and an analyze or parse resume_byte_position. A
+  // response message that would be left with no fields at all is omitted
+  // rather than sent as an empty object.
+  //
+  // It applies to analyze and parse. The remaining operations answer with
+  // their response proto and nothing else, so they reject it instead of
+  // replying with nothing.
+  optional bool omit_response_proto = 1 [default = false];
+}
+
 message FrontendRequest {
   required uint32 protocol_version = 1;
   optional string id = 2;
+  // Applies to whichever operation the request carries.
+  optional ResponseOptions response_options = 3;
 
   oneof operation {
     AnalyzeOperation analyze = 10;
     ParseOperation parse = 11;
     BuiltinFunctionsOperation builtin_functions = 12;
+    LanguageOptionsOperation language_options = 13;
+    AnalyzerOptionsOperation analyzer_options = 14;
   }
 }
 
 message AnalyzeResult {
-  required googlesql.local_service.AnalyzeResponse response = 1;
+  // Absent when the request set response_options.omit_response_proto and the
+  // analysis produced no resume_byte_position to carry.
+  optional googlesql.local_service.AnalyzeResponse response = 1;
   required string debug_string = 2;
 }
 
@@ -67,6 +126,9 @@ message ExtendedParseResponse {
 }
 
 message ParseResult {
+  // Both members are absent when the request set
+  // response_options.omit_response_proto and the parse produced no
+  // resume_byte_position to carry.
   oneof result {
     googlesql.local_service.ParseResponse response = 1;
     ExtendedParseResponse extended_response = 3;
@@ -76,7 +138,19 @@ message ParseResult {
 
 message BuiltinFunctionsResult {
   required googlesql.local_service.GetBuiltinFunctionsResponse response = 1;
-  required string debug_string = 2;
+
+  // Builtin function enumeration has no human-readable rendering of its own,
+  // unlike analyze and parse. The removed field never carried one.
+  reserved 2;
+  reserved "debug_string";
+}
+
+message LanguageOptionsResult {
+  required googlesql.LanguageOptionsProto response = 1;
+}
+
+message AnalyzerOptionsResult {
+  required googlesql.AnalyzerOptionsProto response = 1;
 }
 
 message FrontendErrorLocation {
@@ -105,5 +179,7 @@ message FrontendResponse {
     ParseResult parse = 11;
     BuiltinFunctionsResult builtin_functions = 12;
     FrontendError error = 13;
+    LanguageOptionsResult language_options = 14;
+    AnalyzerOptionsResult analyzer_options = 15;
   }
 }

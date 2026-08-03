@@ -1,0 +1,16 @@
+{
+  "protocolVersion": 1,
+  "id": "omit-resume-1",
+  "responseOptions": {
+    "omitResponseProto": true
+  },
+  "analyze": {
+    "request": {
+      "parseResumeLocation": {
+        "input": "SELECT 1; SELECT 2",
+        "bytePosition": 0,
+        "allowResume": true
+      }
+    }
+  }
+}

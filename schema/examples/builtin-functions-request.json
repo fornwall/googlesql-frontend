@@ -4,7 +4,10 @@
   "builtinFunctions": {
     "request": {
       "languageOptions": {
-        "productMode": "PRODUCT_EXTERNAL"
+        "productMode": "PRODUCT_EXTERNAL",
+        "enabledLanguageFeatures": [
+          "FEATURE_MULTIWAY_UNNEST"
+        ]
       }
     }
   }

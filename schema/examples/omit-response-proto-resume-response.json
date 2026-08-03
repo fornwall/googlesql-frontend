@@ -1,0 +1,10 @@
+{
+  "protocolVersion": 1,
+  "id": "omit-resume-1",
+  "analyze": {
+    "response": {
+      "resumeBytePosition": 9
+    },
+    "debugString": "QueryStmt\n+-output_column_list=..."
+  }
+}

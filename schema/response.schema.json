@@ -25,6 +25,12 @@
     "builtinFunctions": {
       "$ref": "#/$defs/builtinFunctionsSuccess"
     },
+    "languageOptions": {
+      "$ref": "#/$defs/languageOptionsSuccess"
+    },
+    "analyzerOptions": {
+      "$ref": "#/$defs/analyzerOptionsSuccess"
+    },
     "error": {
       "$ref": "#/$defs/error"
     }
@@ -48,6 +54,16 @@
     },
     {
       "required": [
+        "languageOptions"
+      ]
+    },
+    {
+      "required": [
+        "analyzerOptions"
+      ]
+    },
+    {
+      "required": [
         "error"
       ]
     }
@@ -60,6 +76,7 @@
     },
     "analyzeResponse": {
       "type": "object",
+      "description": "Exactly one resolved AST, or, when the request set responseOptions.omitResponseProto, none of them and the resumeBytePosition that survives it.",
       "properties": {
         "resolvedStatement": {
           "type": "object"
@@ -82,11 +99,31 @@
           "required": [
             "resolvedExpression"
           ]
+        },
+        {
+          "required": [
+            "resumeBytePosition"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "resolvedStatement"
+                ]
+              },
+              {
+                "required": [
+                  "resolvedExpression"
+                ]
+              }
+            ]
+          }
         }
       ]
     },
     "parseResponse": {
       "type": "object",
+      "description": "Exactly one parsed AST, or, when the request set responseOptions.omitResponseProto, none of them and the resumeBytePosition that survives it.",
       "properties": {
         "parsedStatement": {
           "type": "object"
@@ -109,6 +146,25 @@
           "required": [
             "parsedScript"
           ]
+        },
+        {
+          "required": [
+            "resumeBytePosition"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "parsedStatement"
+                ]
+              },
+              {
+                "required": [
+                  "parsedScript"
+                ]
+              }
+            ]
+          }
         }
       ]
     },
@@ -174,8 +230,8 @@
     },
     "analyzeSuccess": {
       "type": "object",
+      "description": "response is absent only when the request set responseOptions.omitResponseProto and the analysis left no resumeBytePosition to carry.",
       "required": [
-        "response",
         "debugString"
       ],
       "properties": {
@@ -190,6 +246,7 @@
     },
     "parseSuccess": {
       "type": "object",
+      "description": "Never both response and extendedResponse. Both are absent only when the request set responseOptions.omitResponseProto and the parse left no resumeBytePosition to carry.",
       "required": [
         "debugString"
       ],
@@ -205,31 +262,49 @@
         }
       },
       "additionalProperties": false,
-      "oneOf": [
-        {
-          "required": [
-            "response"
-          ]
-        },
-        {
-          "required": [
-            "extendedResponse"
-          ]
-        }
-      ]
+      "not": {
+        "required": [
+          "response",
+          "extendedResponse"
+        ]
+      }
     },
     "builtinFunctionsSuccess": {
       "type": "object",
       "required": [
-        "response",
-        "debugString"
+        "response"
       ],
       "properties": {
         "response": {
           "$ref": "#/$defs/builtinFunctionsResponse"
-        },
-        "debugString": {
-          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "protoObject": {
+      "type": "object",
+      "description": "An evolving ProtoJSON message from GoogleSQL. Its members track the pinned GoogleSQL commit, which is the point of reading them from the tool."
+    },
+    "languageOptionsSuccess": {
+      "type": "object",
+      "required": [
+        "response"
+      ],
+      "properties": {
+        "response": {
+          "$ref": "#/$defs/protoObject"
+        }
+      },
+      "additionalProperties": false
+    },
+    "analyzerOptionsSuccess": {
+      "type": "object",
+      "required": [
+        "response"
+      ],
+      "properties": {
+        "response": {
+          "$ref": "#/$defs/protoObject"
         }
       },
       "additionalProperties": false
@@ -323,7 +398,9 @@
           "enum": [
             "analyze",
             "parse",
-            "builtinFunctions"
+            "builtinFunctions",
+            "languageOptions",
+            "analyzerOptions"
           ]
         }
       },

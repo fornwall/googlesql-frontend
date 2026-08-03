@@ -1,0 +1,7 @@
+{
+  "protocolVersion": 1,
+  "id": "omit-1",
+  "parse": {
+    "debugString": "QueryStatement [0-8]\n+-query=..."
+  }
+}
