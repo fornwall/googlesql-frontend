@@ -48,13 +48,13 @@ void AddTvfSignature(googlesql::FunctionSignatureProto* signature,
   googlesql::FunctionArgumentTypeProto* argument = signature->add_argument();
   argument->set_kind(argument_kind);
   argument->set_num_occurrences(1);
-  if (argument_kind == googlesql::ARG_TYPE_FIXED) {
+  if (argument_kind == googlesql::ARG_KIND_EXPR_FIXED) {
     argument->mutable_type()->set_type_kind(googlesql::TYPE_STRING);
   }
 
   googlesql::FunctionArgumentTypeProto* result =
       signature->mutable_return_type();
-  result->set_kind(googlesql::ARG_TYPE_RELATION);
+  result->set_kind(googlesql::ARG_KIND_RELATION);
   result->set_num_occurrences(1);
   googlesql::TVFRelationColumnProto* column =
       result->mutable_options()->mutable_relation_input_schema()->add_column();
@@ -1239,8 +1239,8 @@ TEST(FrontendTest, AnalyzesConnectionArgumentOnMultiSignatureTvf) {
   tvf->add_name_path("choose_source");
   tvf->set_group("custom");
   tvf->set_type(googlesql::FunctionEnums::FIXED_OUTPUT_SCHEMA_TVF);
-  AddTvfSignature(tvf->add_signatures(), googlesql::ARG_TYPE_CONNECTION);
-  AddTvfSignature(tvf->add_signatures(), googlesql::ARG_TYPE_FIXED);
+  AddTvfSignature(tvf->add_signatures(), googlesql::ARG_KIND_CONNECTION);
+  AddTvfSignature(tvf->add_signatures(), googlesql::ARG_KIND_EXPR_FIXED);
 
   Frontend frontend;
   ProcessResult result = frontend.ProcessLine(RequestJson(request), 1);

@@ -568,7 +568,7 @@
     "@@googlesql+//bazel:http_archive_deps.bzl%googlesql_http_archive_deps": {
       "general": {
         "bzlTransitiveDigest": "VxoyOmqWPeZjOwUm08B5Qxkw453K3Tethp1r4MCtuI0=",
-        "usagesDigest": "IO5FmV9k33YPcfuoibBmBoXGhN1+XGVuoS1tgm+E1Qk=",
+        "usagesDigest": "rOpbD/7FvGk9QPFfc3clyTDlJTIxc2wusaMy+U7UDQQ=",
         "recordedInputs": [
           "REPO_MAPPING:googlesql+,bazel_tools bazel_tools"
         ],

@@ -3,14 +3,14 @@ module(
     version = "0.5.0",
 )
 
-bazel_dep(name = "googlesql", version = "2026.7.4")
+bazel_dep(name = "googlesql", version = "2026.8.1")
 archive_override(
     module_name = "googlesql",
-    integrity = "sha256-mOsO2Ou5Ws8AkvlX3iz0zXLgKJBw/dSQx6zNjYSlM1w=",
+    integrity = "sha256-XxNPxILy+VCNsmTWpTH8OEn1WLQHDPa6HSE8W7db4gs=",
     patch_strip = 1,
     patches = ["//patches/googlesql:pull-5.patch"],
-    strip_prefix = "googlesql-1f8aa333f4d6353cd3a64471fc83121df72df3f7",
-    urls = ["https://github.com/google/googlesql/archive/1f8aa333f4d6353cd3a64471fc83121df72df3f7.tar.gz"],
+    strip_prefix = "googlesql-3eec7971a4706b04c10019f89d09dda854442c30",
+    urls = ["https://github.com/google/googlesql/archive/3eec7971a4706b04c10019f89d09dda854442c30.tar.gz"],
 )
 
 bazel_dep(name = "abseil-cpp", version = "20260107.0", repo_name = "com_google_absl")
