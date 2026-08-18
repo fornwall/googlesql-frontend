@@ -18,7 +18,7 @@
 namespace googlesql_frontend {
 
 inline constexpr int kProtocolVersion = 1;
-inline constexpr absl::string_view kVersion = "0.5.0";
+inline constexpr absl::string_view kVersion = "0.6.0";
 inline constexpr absl::string_view kGoogleSqlCommit =
     "99c4ca725353518a15eb81b119bffabd0fa6d27d";
 
