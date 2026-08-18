@@ -20,7 +20,7 @@ namespace googlesql_frontend {
 inline constexpr int kProtocolVersion = 1;
 inline constexpr absl::string_view kVersion = "0.5.0";
 inline constexpr absl::string_view kGoogleSqlCommit =
-    "3eec7971a4706b04c10019f89d09dda854442c30";
+    "99c4ca725353518a15eb81b119bffabd0fa6d27d";
 
 // The named catalog most recently built for a Frontend, held so that a stream
 // of requests naming the same one is answered from a single build.
